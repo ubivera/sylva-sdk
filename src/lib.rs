@@ -16,7 +16,10 @@
 //!   endpoint failover, TLS, and the enrollment flows follow.
 //! - [`proto`] (Phase 3b) — generated gRPC client stubs for `sylva.account.v1` +
 //!   `sylva.platform.v1`, from the vendored `proto/` (synced from sylva-hearth).
+//! - [`flows`] (Phase 3b) — the enrollment flows that compose the above into the
+//!   user operations: create the first owner, sign in (+ unlock), manage devices.
 
 pub mod crypto;
+pub mod flows;
 pub mod proto;
 pub mod transport;

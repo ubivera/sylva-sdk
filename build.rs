@@ -16,8 +16,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed={INCLUDE}");
 
     let file_descriptors = protox::compile([PLATFORM_PROTO, ACCOUNT_PROTO], [INCLUDE])?;
+    // Client stubs are what the SDK ships; the server stubs are generated too so
+    // tests can stand up an in-process mock server to exercise the client.
     tonic_prost_build::configure()
-        .build_server(false)
+        .build_server(true)
         .build_client(true)
         .compile_fds(file_descriptors)?;
     Ok(())

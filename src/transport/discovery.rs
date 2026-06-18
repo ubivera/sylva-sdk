@@ -7,7 +7,7 @@
 //! security-critical verification independent makes it exhaustively testable.
 
 use ed25519_dalek::{Signature, VerifyingKey};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// The signed-payload layout this client understands. Must match the server's
 /// `PAYLOAD_VERSION`; a newer version is refused rather than mis-verified.
@@ -26,13 +26,15 @@ pub enum DiscoveryError {
     Malformed(&'static str),
     #[error("discovery signature verification failed")]
     BadSignature,
+    #[error("discovery request failed")]
+    Fetch,
 }
 
 type Result<T> = std::result::Result<T, DiscoveryError>;
 
 /// The raw discovery response as returned by the server (hex-encoded key +
-/// signature).
-#[derive(Debug, Clone, Deserialize)]
+/// signature). `Serialize` is for tests; in production the SDK only deserializes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoveryResponse {
     pub name: String,
     pub server_version: String,
@@ -111,6 +113,59 @@ pub fn check_pin(verified: &VerifiedServer, pinned: Option<&[u8; 32]>) -> TrustD
         Some(pin) if pin == &verified.identity_public => TrustDecision::Matches,
         Some(_) => TrustDecision::Mismatch,
     }
+}
+
+/// Parse a discovery JSON body and verify it against `expected_nonce`. The pure
+/// half of [`fetch_and_verify`], split out so the parse + verify pipeline is
+/// testable without a network.
+pub fn parse_and_verify(body: &[u8], expected_nonce: &str) -> Result<VerifiedServer> {
+    let response: DiscoveryResponse =
+        serde_json::from_slice(body).map_err(|_| DiscoveryError::Malformed("response body"))?;
+    verify_discovery(&response, expected_nonce)
+}
+
+/// Fetch + verify discovery from a base server URL (e.g. `http://host:port`):
+/// generate a fresh nonce, `GET /.well-known/hearth-discovery`, and verify the
+/// signed response. The caller still decides *trust* via [`check_pin`].
+///
+/// Connection is plain HTTP for now (dev); HTTPS arrives with the TLS work. The
+/// signature + identity pin are the trust anchor regardless.
+pub async fn fetch_and_verify(base_url: &str) -> Result<VerifiedServer> {
+    let nonce = random_nonce();
+    let url = discovery_url(base_url, &nonce);
+    let response = reqwest::get(&url).await.map_err(|_| DiscoveryError::Fetch)?;
+    if !response.status().is_success() {
+        return Err(DiscoveryError::Fetch);
+    }
+    let body = response.bytes().await.map_err(|_| DiscoveryError::Fetch)?;
+    parse_and_verify(&body, &nonce)
+}
+
+/// `{base}/.well-known/hearth-discovery?nonce={nonce}` (a trailing slash on
+/// `base` is tolerated).
+fn discovery_url(base_url: &str, nonce: &str) -> String {
+    format!(
+        "{}/.well-known/hearth-discovery?nonce={}",
+        base_url.trim_end_matches('/'),
+        nonce
+    )
+}
+
+/// A fresh 128-bit random discovery nonce, hex-encoded.
+fn random_nonce() -> String {
+    let mut bytes = [0u8; 16];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut bytes);
+    encode_hex(&bytes)
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    s
 }
 
 /// The exact bytes the server signed — domain-separated and length-prefixed per
@@ -270,5 +325,70 @@ mod tests {
         assert_eq!(check_pin(&verified, None), TrustDecision::FirstContact);
         assert_eq!(check_pin(&verified, Some(&pin)), TrustDecision::Matches);
         assert_eq!(check_pin(&verified, Some(&[0u8; 32])), TrustDecision::Mismatch);
+    }
+
+    #[test]
+    fn parse_and_verify_round_trips_through_json() {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let resp = signed_response(&key, "nonce-1", "My Hearth", 50051);
+        let json = serde_json::to_vec(&resp).unwrap();
+        let verified = parse_and_verify(&json, "nonce-1").unwrap();
+        assert_eq!(verified.identity_public, key.verifying_key().to_bytes());
+        assert_eq!(verified.grpc_port, 50051);
+    }
+
+    #[test]
+    fn parse_and_verify_accepts_the_server_json_shape() {
+        // A hand-written body with the server's exact field names + a valid
+        // signature — locks the wire format the SDK must parse.
+        let key = SigningKey::from_bytes(&[3u8; 32]);
+        let resp = signed_response(&key, "nonce-xyz", "H", 50051);
+        let json = format!(
+            r#"{{"name":"{}","server_version":"{}","grpc_port":{},"server_identity_public":"{}","nonce":"{}","signature":"{}","payload_version":{}}}"#,
+            resp.name,
+            resp.server_version,
+            resp.grpc_port,
+            resp.server_identity_public,
+            resp.nonce,
+            resp.signature,
+            resp.payload_version
+        );
+        assert!(parse_and_verify(json.as_bytes(), "nonce-xyz").is_ok());
+    }
+
+    #[test]
+    fn parse_and_verify_rejects_malformed_json_and_bad_nonce() {
+        assert!(matches!(
+            parse_and_verify(b"not json", "n"),
+            Err(DiscoveryError::Malformed(_))
+        ));
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let json = serde_json::to_vec(&signed_response(&key, "good", "H", 50051)).unwrap();
+        assert!(matches!(
+            parse_and_verify(&json, "wrong"),
+            Err(DiscoveryError::NonceMismatch)
+        ));
+    }
+
+    #[test]
+    fn discovery_url_builds_correctly() {
+        assert_eq!(
+            discovery_url("http://host:8443", "abc"),
+            "http://host:8443/.well-known/hearth-discovery?nonce=abc"
+        );
+        // A trailing slash on the base is tolerated (no doubled slash).
+        assert_eq!(
+            discovery_url("http://host:8443/", "abc"),
+            "http://host:8443/.well-known/hearth-discovery?nonce=abc"
+        );
+    }
+
+    #[test]
+    fn random_nonce_is_unique_hex() {
+        let a = random_nonce();
+        let b = random_nonce();
+        assert_eq!(a.len(), 32);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b, "nonces must be fresh per call");
     }
 }

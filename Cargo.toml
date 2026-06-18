@@ -32,10 +32,18 @@ thiserror = "2"
 tonic = "0.14"
 tonic-prost = "0.14"
 prost = "0.14"
+# Discovery is a plain-HTTP GET in dev; no TLS feature (avoids pulling an
+# aws-lc-rs/NASM toolchain on Windows). HTTPS support is added with the TLS work.
+reqwest = { version = "0.12", default-features = false }
 
 [build-dependencies]
 tonic-prost-build = "0.14"
 protox = "0.9"
+
+[dev-dependencies]
+# Async runtime + an in-process mock gRPC server for the transport tests.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+tokio-stream = { version = "0.1", features = ["net"] }
 
 [lints.rust]
 unsafe_code = "forbid"
