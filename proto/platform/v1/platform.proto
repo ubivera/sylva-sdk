@@ -1,0 +1,135 @@
+syntax = "proto3";
+
+// Canonical wire contract for the Sylva Hearth platform API. Lives at the repo
+// root (not inside a crate) so the future `sylva-sdk` can consume it via a git
+// submodule. The `proto` crate generates Rust stubs from this.
+package sylva.platform.v1;
+
+message Empty {}
+
+// Identity of the caller, derived server-side from the authenticated session.
+message WhoAmIResponse {
+  string user_id = 1;
+  string display_name = 2;
+  string instance_role = 3; // "owner" | "admin" | "member"
+}
+
+// The platform service. CP1 exposes only WhoAmI to prove the transport +
+// auth path; resource storage + app registration land in later checkpoints.
+service Platform {
+  rpc WhoAmI(Empty) returns (WhoAmIResponse);
+  rpc RegisterApp(RegisterAppRequest) returns (AppRegistration);
+  rpc GetAppRegistration(AppIdentifier) returns (AppRegistration);
+}
+
+// ── App registration (CP3) ──────────────────────────────────────────────────
+
+// An app's signed registration declaration. `signature` is the publisher's
+// Ed25519 signature over the canonical encoding of the other fields.
+message RegisterAppRequest {
+  string app_identifier = 1;          // "garden.ubivera.tasks"
+  string display_name = 2;
+  string publisher = 3;               // must be a trusted publisher
+  bytes app_public_key = 4;           // the app's own Ed25519 key
+  int32 schema_version = 5;
+  repeated string resource_types = 6;
+  bytes signature = 7;
+}
+
+message AppIdentifier {
+  string app_identifier = 1;
+}
+
+message AppRegistration {
+  string id = 1;                      // server-assigned app id
+  string app_identifier = 2;
+  string display_name = 3;
+  string publisher = 4;
+  int32 schema_version = 5;
+  repeated string resource_types = 6;
+  string status = 7;                  // "enabled" | "disabled"
+  string created_at = 8;
+  string updated_at = 9;
+}
+
+// ── Resources: generic app content storage (CP2, owner-scoped) ──────────────
+
+// A stored resource. Metadata is server-readable; `content_blob` is opaque
+// ciphertext the server never decrypts. Timestamps are RFC 3339 strings.
+message Resource {
+  string id = 1;                          // server-assigned UUID
+  string app_id = 2;
+  string resource_type = 3;
+  string app_resource_id = 4;             // the app's own id (UUID)
+  optional string parent_resource_id = 5;
+  string owner_user_id = 6;
+  string created_at = 7;
+  string updated_at = 8;
+  optional string deleted_at = 9;
+  bytes content_blob = 10;
+  bytes content_signature = 11;
+  string last_modified_by = 12;
+  int32 schema_version = 13;
+  // Monotonic per-resource change sequence, bumped on every create/update/
+  // delete. Clients persist the max they've seen and pass it as a sync cursor.
+  uint64 change_seq = 14;
+}
+
+message CreateResourceRequest {
+  string app_id = 1;
+  string resource_type = 2;
+  string app_resource_id = 3;             // client-generated UUID
+  optional string parent_resource_id = 4;
+  bytes content_blob = 5;
+  bytes content_signature = 6;
+  int32 schema_version = 7;
+}
+
+message ResourceId {
+  string id = 1;                          // server-assigned resource id
+}
+
+message UpdateResourceRequest {
+  string id = 1;                          // server-assigned resource id
+  optional string parent_resource_id = 2;
+  bytes content_blob = 3;
+  bytes content_signature = 4;
+  int32 schema_version = 5;
+}
+
+message ListResourcesRequest {
+  string app_id = 1;
+  string resource_type = 2;
+  uint32 limit = 3;                       // 0 -> server default
+  uint32 offset = 4;
+  bool include_deleted = 5;               // default false (tombstones hidden)
+}
+
+message ListResourcesResponse {
+  repeated Resource resources = 1;
+  uint32 total = 2;                       // total matching (ignoring limit/offset)
+}
+
+// Owner-scoped incremental sync. Emits every resource (including tombstones —
+// `deleted_at` set) whose `change_seq` exceeds `since_cursor`, oldest change
+// first. The client persists the max `change_seq` it applies and passes it back
+// as `since_cursor` next time. One call returns a bounded catch-up batch; the
+// client re-calls with the new cursor until a call yields nothing.
+message StreamChangesRequest {
+  string app_id = 1;
+  string resource_type = 2;               // optional filter; empty = all types
+  uint64 since_cursor = 3;                 // exclusive; 0 = from the beginning
+  uint32 limit = 4;                        // 0 -> server default
+}
+
+// CP2 storage API. All operations are owner-scoped: the caller is the owner,
+// and a resource owned by someone else is invisible (NotFound). `StreamChanges`
+// (CP-sync) is the incremental-sync feed; resource sharing/ReBAC is later.
+service Resources {
+  rpc CreateResource(CreateResourceRequest) returns (Resource);
+  rpc ReadResource(ResourceId) returns (Resource);
+  rpc UpdateResource(UpdateResourceRequest) returns (Resource);
+  rpc DeleteResource(ResourceId) returns (Empty);
+  rpc ListResources(ListResourcesRequest) returns (ListResourcesResponse);
+  rpc StreamChanges(StreamChangesRequest) returns (stream Resource);
+}

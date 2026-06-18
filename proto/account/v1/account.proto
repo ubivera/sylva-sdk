@@ -1,0 +1,124 @@
+syntax = "proto3";
+
+// Sylva Hub — identity / device-enrollment plane. Distinct from the app-data
+// platform (`sylva.platform.v1`): the Hub is core infrastructure, not a
+// registered app. Server discovery (`/.well-known/hearth-discovery`) is REST,
+// not gRPC, so it is not modeled here. See docs/design/hub.md.
+//
+// Auth (this slice): the client sends the password over TLS and the server
+// verifies it against a server-side Argon2id verifier (OPAQUE is a later
+// hardening). Key-wrapping is separate and client-side: the master key is
+// wrapped under KDF(password, secret_key) (1Password-style 2SKD); the server
+// stores only the ciphertext + public keys + the verifier — never the password
+// long-term, the Secret Key, the master key, or any private key.
+package sylva.account.v1;
+
+message Empty {}
+
+// The user's wrapped key bundle — ciphertext + public keys only.
+message KeyMaterial {
+  bytes x25519_public = 1;            // receives wrapped content keys
+  bytes ed25519_public = 2;           // signature verification
+  bytes x25519_private_wrapped = 3;   // wrapped by the master key
+  bytes ed25519_private_wrapped = 4;  // wrapped by the master key
+  // Master key wrapped by KEK = Argon2id(password, secret_key) — the only copy.
+  bytes master_key_wrapped = 5;
+  bytes kdf_salt = 6;                 // salt for the wrapping KDF
+  string kdf_params = 7;              // JSON: Argon2id m/t/p (client re-derivation)
+}
+
+// A device being enrolled. The private key for `device_public_key` stays in the
+// device's OS keychain. `machine_label` is the thin slice-1 machine reference.
+message DeviceEnrollment {
+  string device_label = 1;
+  string platform = 2;                // windows|macos|ios|android
+  bytes device_public_key = 3;        // X25519
+  string machine_label = 4;
+}
+
+// ── Bootstrap (first owner) ──────────────────────────────────────────────────
+// Unauthenticated; rejected once any user exists. Creates the owner from
+// client-generated crypto and enrolls the bootstrapping device, returning a
+// session. Replaces `provision`'s owner creation.
+message BootstrapRequest {
+  string email = 1;
+  string display_name = 2;
+  string password = 3;                // over TLS; server stores an Argon2id verifier
+  KeyMaterial key_material = 4;
+  DeviceEnrollment device = 5;
+}
+
+// ── Login ────────────────────────────────────────────────────────────────────
+message LoginRequest {
+  string email = 1;
+  string password = 2;                // over TLS
+  // MFA second leg (contract-provisioned; unused in slice 1).
+  string mfa_challenge_token = 3;
+  bytes mfa_response = 4;
+}
+
+message Session {
+  string token = 1;                   // opaque session token (slice 1)
+  string user_id = 2;
+  string expires_at = 3;              // RFC 3339
+}
+
+message MfaRequired {
+  string mfa_challenge_token = 1;
+  repeated string methods = 2;        // "totp" | "passkey"
+}
+
+message LoginResponse {
+  oneof outcome {
+    Session session = 1;
+    MfaRequired mfa_required = 2;
+  }
+}
+
+// Declared for the contract; unimplemented in slice 1 (the bootstrap owner has
+// no second factor yet).
+message VerifyMfaRequest {
+  string mfa_challenge_token = 1;
+  bytes mfa_response = 2;
+}
+
+message GetKeyMaterialResponse {
+  KeyMaterial key_material = 1;
+}
+
+// ── Devices ──────────────────────────────────────────────────────────────────
+message RegisterDeviceRequest {
+  DeviceEnrollment device = 1;
+}
+
+message Device {
+  string device_id = 1;
+  string device_label = 2;
+  string platform = 3;
+  string machine_id = 4;              // empty if none
+  string created_at = 5;              // RFC 3339
+  string last_seen_at = 6;            // empty if never
+  string revoked_at = 7;              // empty if active
+}
+
+message ListMyDevicesResponse {
+  repeated Device devices = 1;
+}
+
+message DeviceId {
+  string device_id = 1;
+}
+
+// The Hub's identity/enrollment service — core infrastructure, distinct from
+// Platform/Resources. `Bootstrap` + `Login` are unauthenticated (peer-IP
+// rate-limited server-side); the rest require the session token in
+// `authorization: Bearer <token>` metadata and are owner-scoped.
+service Account {
+  rpc Bootstrap(BootstrapRequest) returns (Session);
+  rpc Login(LoginRequest) returns (LoginResponse);
+  rpc VerifyMfa(VerifyMfaRequest) returns (Session);
+  rpc GetKeyMaterial(Empty) returns (GetKeyMaterialResponse);
+  rpc RegisterDevice(RegisterDeviceRequest) returns (Device);
+  rpc ListMyDevices(Empty) returns (ListMyDevicesResponse);
+  rpc RevokeDevice(DeviceId) returns (Empty);
+}
