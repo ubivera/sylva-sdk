@@ -104,7 +104,8 @@ impl MasterKey {
         Self(bytes)
     }
 
-    fn from_bytes(bytes: [u8; KEY_LEN]) -> Self {
+    /// Reconstruct from raw bytes (e.g. rehydrating from the OS keychain).
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 

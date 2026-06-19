@@ -86,6 +86,11 @@ impl AccountSession {
         }
     }
 
+    /// The session token this client authenticates with (for caching).
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
     /// Wrap a message in a request bearing the session token.
     fn authed<T>(&self, message: T) -> tonic::Request<T> {
         let mut request = tonic::Request::new(message);

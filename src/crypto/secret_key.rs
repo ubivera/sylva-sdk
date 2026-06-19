@@ -34,6 +34,14 @@ impl SecretKey {
         &self.0
     }
 
+    /// Reconstruct from raw bytes (e.g. rehydrating from the OS keychain).
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let arr: [u8; SECRET_KEY_BYTES] = bytes
+            .try_into()
+            .map_err(|_| CryptoError::SecretKey("wrong length"))?;
+        Ok(Self(arr))
+    }
+
     /// The grouped Crockford rendering for the write-down screen
     /// (e.g. `H8QK-9R4M-NXBP-V2T8-3JDQ-6KWS-MGYF-PE5X`).
     pub fn display(&self) -> String {

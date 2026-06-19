@@ -18,8 +18,24 @@
 //!   `sylva.platform.v1`, from the vendored `proto/` (synced from sylva-hearth).
 //! - [`flows`] (Phase 3b) — the enrollment flows that compose the above into the
 //!   user operations: create the first owner, sign in (+ unlock), manage devices.
+//! - [`storage`] (Phase 3.4) — per-OS-user keychain persistence of the enrollment
+//!   secrets + server profile, so a device stays enrolled across launches.
+//! - [`client`] (Phase 3.6) — the high-level [`client::SylvaClient`] facade the
+//!   native shell drives: a stateful handle composing transport + flows +
+//!   storage into connect / create-owner / sign-in / device-management calls.
+//!   (The `uniffi` boundary + a blocking wrapper expose it to C# next.)
 
+pub mod client;
 pub mod crypto;
 pub mod flows;
 pub mod proto;
+pub mod storage;
 pub mod transport;
+
+#[cfg(feature = "ffi")]
+pub mod ffi;
+
+// uniffi proc-macro scaffolding for the FFI boundary (feature-gated). C# bindings
+// are generated from this by `uniffi-bindgen-cs` in Phase 4.
+#[cfg(feature = "ffi")]
+uniffi::setup_scaffolding!();
