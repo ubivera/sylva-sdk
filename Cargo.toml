@@ -10,6 +10,10 @@ publish = false
 [lib]
 name = "sylva_sdk"
 path = "src/lib.rs"
+# `cdylib` is the loadable library the C# bindings (uniffi-bindgen-cs) link
+# against; `lib` (rlib) is what the e2e + other Rust consumers use. Only built
+# when sylva-sdk is the top-level target, so dependents are unaffected.
+crate-type = ["cdylib", "lib"]
 
 [features]
 # The uniffi FFI boundary for native shells (Sylva Hub). Off by default so the
