@@ -1,5 +1,5 @@
-//! Client side of server discovery: verify a `/.well-known/hearth-discovery`
-//! response and decide trust (TOFU). The server side is `hearth::discovery`;
+//! Client side of server discovery: verify a `/.well-known/sylva-discovery`
+//! response and decide trust (TOFU). The server side is `server::discovery`;
 //! see `design/hub.md` + `docs/dev/hub-discovery.md` in the workspace.
 //!
 //! This module is **pure** — it verifies an already-fetched response. The HTTP
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 const PAYLOAD_VERSION: u32 = 1;
 
 /// Domain-separation tag — identical to the server's, byte for byte.
-const DOMAIN: &[u8] = b"sylva.hearth.discovery.v1";
+const DOMAIN: &[u8] = b"sylva.discovery.v1";
 
 #[derive(Debug, thiserror::Error)]
 pub enum DiscoveryError {
@@ -125,7 +125,7 @@ pub fn parse_and_verify(body: &[u8], expected_nonce: &str) -> Result<VerifiedSer
 }
 
 /// Fetch + verify discovery from a base server URL (e.g. `http://host:port`):
-/// generate a fresh nonce, `GET /.well-known/hearth-discovery`, and verify the
+/// generate a fresh nonce, `GET /.well-known/sylva-discovery`, and verify the
 /// signed response. The caller still decides *trust* via [`check_pin`].
 ///
 /// Connection is plain HTTP for now (dev); HTTPS arrives with the TLS work. The
@@ -141,11 +141,11 @@ pub async fn fetch_and_verify(base_url: &str) -> Result<VerifiedServer> {
     parse_and_verify(&body, &nonce)
 }
 
-/// `{base}/.well-known/hearth-discovery?nonce={nonce}` (a trailing slash on
+/// `{base}/.well-known/sylva-discovery?nonce={nonce}` (a trailing slash on
 /// `base` is tolerated).
 fn discovery_url(base_url: &str, nonce: &str) -> String {
     format!(
-        "{}/.well-known/hearth-discovery?nonce={}",
+        "{}/.well-known/sylva-discovery?nonce={}",
         base_url.trim_end_matches('/'),
         nonce
     )
@@ -169,7 +169,7 @@ fn encode_hex(bytes: &[u8]) -> String {
 }
 
 /// The exact bytes the server signed — domain-separated and length-prefixed per
-/// field. MUST stay byte-for-byte identical to `hearth::discovery::canonical_bytes`.
+/// field. MUST stay byte-for-byte identical to `server::discovery::canonical_bytes`.
 fn canonical_bytes(nonce: &str, public: &[u8; 32], grpc_port: u16, name: &str) -> Vec<u8> {
     let mut out = Vec::new();
     push_field(&mut out, DOMAIN);
@@ -374,12 +374,12 @@ mod tests {
     fn discovery_url_builds_correctly() {
         assert_eq!(
             discovery_url("http://host:8443", "abc"),
-            "http://host:8443/.well-known/hearth-discovery?nonce=abc"
+            "http://host:8443/.well-known/sylva-discovery?nonce=abc"
         );
         // A trailing slash on the base is tolerated (no doubled slash).
         assert_eq!(
             discovery_url("http://host:8443/", "abc"),
-            "http://host:8443/.well-known/hearth-discovery?nonce=abc"
+            "http://host:8443/.well-known/sylva-discovery?nonce=abc"
         );
     }
 

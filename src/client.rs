@@ -111,7 +111,7 @@ pub struct SylvaClient {
 
 impl SylvaClient {
     /// Production constructor: secrets live in the OS keychain under `service`
-    /// (e.g. `"sylva-hub"`), scoped to the current OS user.
+    /// (e.g. `"sylva-client"`), scoped to the current OS user.
     pub fn new(service: impl Into<String>) -> Self {
         Self::with_store(Box::new(OsKeychain::new(service)))
     }

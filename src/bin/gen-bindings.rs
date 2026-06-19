@@ -4,12 +4,12 @@
 //!
 //!   cargo run --bin gen-bindings -- [--out-dir <dir>] [--release]
 //!
-//! Default `--out-dir`: `../sylva-hub/bindings/csharp` (sibling layout).
+//! Default `--out-dir`: `../sylva-client/bindings/csharp` (sibling layout).
 //!
 //! Cross-platform + cargo-native (replaces the old PowerShell script): the
 //! native library name is resolved per-OS (`sylva_sdk.dll` / `libsylva_sdk.dylib`
 //! / `libsylva_sdk.so`). Prerequisites: the MSVC build env on Windows (see
-//! docs/dev/hearth-build-env.md) and `uniffi-bindgen-cs` whose `+vX.Y.Z` tag
+//! docs/dev/server-build-env.md) and `uniffi-bindgen-cs` whose `+vX.Y.Z` tag
 //! matches the crate's `uniffi` pin (see docs/dev/hub-csharp-bindings.md).
 
 use std::path::PathBuf;
@@ -21,7 +21,7 @@ fn main() -> Fallible {
     let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut out_dir = crate_dir
         .join("..")
-        .join("sylva-hub")
+        .join("sylva-client")
         .join("bindings")
         .join("csharp");
     let mut release = false;

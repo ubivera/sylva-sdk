@@ -23,7 +23,7 @@ crate-type = ["cdylib", "lib"]
 ffi = ["dep:uniffi", "tokio/rt-multi-thread", "tokio/net", "tokio/time"]
 
 [dependencies]
-# Client-side end-to-end crypto. Versions track sylva-hearth where shared so the
+# Client-side end-to-end crypto. Versions track sylva-server where shared so the
 # wire/byte formats stay interoperable.
 argon2 = "0.5"
 chacha20poly1305 = "0.10"
@@ -38,7 +38,7 @@ serde_json = "1"
 thiserror = "2"
 
 # gRPC client stubs (generated from the vendored protos). Versions track
-# sylva-hearth's proto crate (tonic 0.14 split codegen/runtime; tonic-prost is
+# sylva-server's proto crate (tonic 0.14 split codegen/runtime; tonic-prost is
 # the codec, protox a pure-Rust .proto compiler so no system protoc is needed).
 tonic = "0.14"
 tonic-prost = "0.14"

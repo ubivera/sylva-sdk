@@ -1,5 +1,5 @@
 //! Generate the gRPC **client** stubs from the vendored `.proto` files (copied
-//! from sylva-hearth — see `proto/` + `scripts/sync-proto.ps1`).
+//! from sylva-server — see `proto/` + `cargo run --bin sync-proto`).
 //!
 //! Uses `protox` (pure-Rust protobuf compiler) → `FileDescriptorSet`, then
 //! `tonic-prost-build`, so the build needs no system `protoc`. Client-only: the

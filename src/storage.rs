@@ -142,7 +142,7 @@ impl<S: SecretStore> Vault<S> {
 
 /// The production [`SecretStore`]: the per-OS-user OS keychain (Windows
 /// Credential Manager / macOS Keychain / Linux secret-service, via `keyring`).
-/// Entries are namespaced by a service name (e.g. `"sylva-hub"`).
+/// Entries are namespaced by a service name (e.g. `"sylva-client"`).
 pub struct OsKeychain {
     service: String,
 }

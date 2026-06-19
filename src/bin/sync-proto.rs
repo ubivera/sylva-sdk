@@ -1,23 +1,23 @@
 //! `sync-proto` — re-vendor the canonical `.proto` files from the sibling
-//! sylva-hearth repo into this crate's `proto/` tree. Run after Hearth's proto
+//! sylva-server repo into this crate's `proto/` tree. Run after Hearth's proto
 //! contract changes, then rebuild (build.rs regenerates the stubs) and commit
 //! the updated `proto/`.
 //!
 //!   cargo run --bin sync-proto
 //!
 //! Cross-platform + cargo-native (replaces the old PowerShell script). Assumes
-//! the standard workspace layout (sylva-hearth + sylva-sdk as siblings).
+//! the standard workspace layout (sylva-server + sylva-sdk as siblings).
 
 use std::path::{Path, PathBuf};
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let src = crate_dir.join("..").join("sylva-hearth").join("proto");
+    let src = crate_dir.join("..").join("sylva-server").join("proto");
     let dst = crate_dir.join("proto");
 
     if !src.is_dir() {
         return Err(format!(
-            "hearth proto dir not found: {} (expected a sibling sylva-hearth checkout)",
+            "server proto dir not found: {} (expected a sibling sylva-server checkout)",
             src.display()
         )
         .into());

@@ -29,7 +29,7 @@ pub struct SylvaHub {
 #[uniffi::export]
 impl SylvaHub {
     /// Create a hub whose secrets live in the OS keychain under `service`
-    /// (e.g. `"sylva-hub"`), scoped to the current OS user.
+    /// (e.g. `"sylva-client"`), scoped to the current OS user.
     #[uniffi::constructor]
     pub fn new(service: String) -> Result<Arc<Self>, ClientError> {
         let runtime = tokio::runtime::Builder::new_multi_thread()

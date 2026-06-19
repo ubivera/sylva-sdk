@@ -2,7 +2,7 @@ syntax = "proto3";
 
 // Sylva Hub — identity / device-enrollment plane. Distinct from the app-data
 // platform (`sylva.platform.v1`): the Hub is core infrastructure, not a
-// registered app. Server discovery (`/.well-known/hearth-discovery`) is REST,
+// registered app. Server discovery (`/.well-known/sylva-discovery`) is REST,
 // not gRPC, so it is not modeled here. See docs/design/hub.md.
 //
 // Auth (this slice): the client sends the password over TLS and the server

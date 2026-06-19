@@ -15,7 +15,7 @@
 //!   **discovery** response verification + TOFU identity pinning. The HTTP fetch,
 //!   endpoint failover, TLS, and the enrollment flows follow.
 //! - [`proto`] (Phase 3b) — generated gRPC client stubs for `sylva.account.v1` +
-//!   `sylva.platform.v1`, from the vendored `proto/` (synced from sylva-hearth).
+//!   `sylva.platform.v1`, from the vendored `proto/` (synced from sylva-server).
 //! - [`flows`] (Phase 3b) — the enrollment flows that compose the above into the
 //!   user operations: create the first owner, sign in (+ unlock), manage devices.
 //! - [`storage`] (Phase 3.4) — per-OS-user keychain persistence of the enrollment
