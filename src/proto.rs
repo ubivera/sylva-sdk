@@ -1,4 +1,4 @@
-//! Generated gRPC **client** stubs for the Hearth APIs (`sylva.account.v1` +
+//! Generated gRPC **client** stubs for the Sylva Server APIs (`sylva.account.v1` +
 //! `sylva.platform.v1`), produced by `build.rs` from the vendored `proto/`.
 //!
 //! This is codegen output (tonic-prost-build), not hand-audited code, so it

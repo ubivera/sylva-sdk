@@ -1,7 +1,7 @@
-//! The gRPC transport to a Hearth `Account` service: ordered-endpoint failover
+//! The gRPC transport to a Sylva Server `Account` service: ordered-endpoint failover
 //! connect + an authenticated client wrapper that attaches the session token.
 //!
-//! Connection is **h2c** (plaintext HTTP/2) for now — Hearth serves gRPC without
+//! Connection is **h2c** (plaintext HTTP/2) for now — Sylva Server serves gRPC without
 //! TLS at this layer (a reverse proxy terminates TLS in production). The
 //! self-signed-TLS-anchored-on-the-identity-key path (design `hub.md`) lands when
 //! TLS termination moves in; the discovery identity pin is the trust anchor

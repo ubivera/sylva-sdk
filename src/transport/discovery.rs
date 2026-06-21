@@ -239,10 +239,10 @@ mod tests {
     #[test]
     fn verifies_a_well_formed_response() {
         let key = SigningKey::from_bytes(&[7u8; 32]);
-        let resp = signed_response(&key, "abc123", "My Hearth", 50051);
+        let resp = signed_response(&key, "abc123", "My Sylva Server", 50051);
         let verified = verify_discovery(&resp, "abc123").unwrap();
         assert_eq!(verified.identity_public, key.verifying_key().to_bytes());
-        assert_eq!(verified.name, "My Hearth");
+        assert_eq!(verified.name, "My Sylva Server");
         assert_eq!(verified.grpc_port, 50051);
     }
 
@@ -330,7 +330,7 @@ mod tests {
     #[test]
     fn parse_and_verify_round_trips_through_json() {
         let key = SigningKey::from_bytes(&[7u8; 32]);
-        let resp = signed_response(&key, "nonce-1", "My Hearth", 50051);
+        let resp = signed_response(&key, "nonce-1", "My Sylva Server", 50051);
         let json = serde_json::to_vec(&resp).unwrap();
         let verified = parse_and_verify(&json, "nonce-1").unwrap();
         assert_eq!(verified.identity_public, key.verifying_key().to_bytes());

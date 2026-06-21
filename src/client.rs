@@ -1,4 +1,4 @@
-//! [`SylvaClient`] — the high-level client facade the native shell drives. A
+//! [`Client`] — the high-level client facade the native shell drives. A
 //! single stateful handle that composes the [transport](crate::transport),
 //! [flows](crate::flows), and [storage](crate::storage) into the operations the
 //! Connect → Create-owner / Sign-in → Name-device → My-devices screens need.
@@ -50,7 +50,7 @@ pub enum TrustStatus {
     Trusted,
 }
 
-/// What [`SylvaClient::connect`] learned, for the Connect screen's confirm step.
+/// What [`Client::connect`] learned, for the Connect screen's confirm step.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct ConnectInfo {
@@ -104,12 +104,12 @@ struct Inner {
 }
 
 /// The stateful client handle the shell holds for the lifetime of the app.
-pub struct SylvaClient {
+pub struct Client {
     inner: Mutex<Inner>,
     vault: Vault<Box<dyn SecretStore + Send + Sync>>,
 }
 
-impl SylvaClient {
+impl Client {
     /// Production constructor: secrets live in the OS keychain under `service`
     /// (e.g. `"sylva-client"`), scoped to the current OS user.
     pub fn new(service: impl Into<String>) -> Self {
@@ -327,7 +327,7 @@ impl SylvaClient {
     }
 }
 
-/// The post-auth state to cache (bundled to keep [`SylvaClient::persist`] tidy).
+/// The post-auth state to cache (bundled to keep [`Client::persist`] tidy).
 /// `device_secret` is `Some` only when the call enrolled a device (bootstrap).
 struct ToCache<'a> {
     identity_public: [u8; 32],
@@ -515,7 +515,7 @@ mod tests {
     /// Inject a connected channel + a verified server, bypassing discovery (which
     /// needs an HTTP server; covered by the cross-stack e2e). Lets the facade's
     /// post-connect flows be tested against a mock gRPC server.
-    async fn inject(client: &SylvaClient, addr: &str) {
+    async fn inject(client: &Client, addr: &str) {
         let channel = transport::connect(&[addr.to_string()]).await.unwrap();
         let mut inner = client.inner.lock().await;
         inner.channel = Some(channel);
@@ -531,7 +531,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn create_owner_caches_state_and_manages_devices() {
         let (addr, shutdown) = spawn(pb::KeyMaterial::default()).await;
-        let client = SylvaClient::with_store(Box::new(MemoryStore::new()));
+        let client = Client::with_store(Box::new(MemoryStore::new()));
         inject(&client, &addr).await;
 
         let enrollment = client
@@ -570,7 +570,7 @@ mod tests {
         let boot = crypto::bootstrap_identity_with_params("pw", fast()).unwrap();
         let secret_key_str = boot.secret_key.display();
         let (addr, shutdown) = spawn(key_material(&boot.bundle)).await;
-        let client = SylvaClient::with_store(Box::new(MemoryStore::new()));
+        let client = Client::with_store(Box::new(MemoryStore::new()));
         inject(&client, &addr).await;
 
         // New-device sign-in: the user supplies the Secret Key.
@@ -590,7 +590,7 @@ mod tests {
     async fn sign_in_wrong_secret_key_fails() {
         let boot = crypto::bootstrap_identity_with_params("pw", fast()).unwrap();
         let (addr, shutdown) = spawn(key_material(&boot.bundle)).await;
-        let client = SylvaClient::with_store(Box::new(MemoryStore::new()));
+        let client = Client::with_store(Box::new(MemoryStore::new()));
         inject(&client, &addr).await;
 
         let wrong = SecretKey::generate().display();
@@ -602,7 +602,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn calls_before_connect_or_signin_are_rejected() {
-        let client = SylvaClient::with_store(Box::new(MemoryStore::new()));
+        let client = Client::with_store(Box::new(MemoryStore::new()));
         assert!(matches!(
             client.create_owner("o@x", "O", "pw", "PC").await,
             Err(ClientError::NotConnected)

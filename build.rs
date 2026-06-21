@@ -3,7 +3,7 @@
 //!
 //! Uses `protox` (pure-Rust protobuf compiler) → `FileDescriptorSet`, then
 //! `tonic-prost-build`, so the build needs no system `protoc`. Client-only: the
-//! SDK calls Hearth, it doesn't serve.
+//! SDK calls Sylva Server, it doesn't serve.
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Vendored under this crate's `proto/`.
