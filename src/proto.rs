@@ -20,6 +20,12 @@ pub mod platform {
     }
 }
 
+pub mod machine {
+    pub mod v1 {
+        include!(concat!(env!("OUT_DIR"), "/sylva.machine.v1.rs"));
+    }
+}
+
 #[cfg(test)]
 mod smoke {
     //! Codegen sanity — the generated message types exist with the expected
@@ -41,5 +47,15 @@ mod smoke {
             id: "r1".to_string(),
         };
         assert_eq!(resource.id, "r1");
+    }
+
+    #[test]
+    fn machine_types_are_generated() {
+        let _ = super::machine::v1::RegisterMachineRequest::default();
+        let _ = super::machine::v1::Empty {};
+        let cfg = super::machine::v1::MachineConfig {
+            location_enabled: true,
+        };
+        assert!(cfg.location_enabled);
     }
 }

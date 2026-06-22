@@ -1,0 +1,78 @@
+syntax = "proto3";
+
+// Sylva machine / management plane (Hub slice 2) — the always-on device agent's
+// API, distinct from the user/identity plane (`sylva.account.v1`). The agent is a
+// headless service (one per machine), not a user.
+//
+// The server is **zero-knowledge**: device telemetry is end-to-end encrypted to
+// the device-admin group key and commands are encrypted to the machine key — the
+// server stores/relays ciphertext and reads only auth keys, liveness, and
+// envelope metadata (which machine, blob kind, recipient, sequence). See
+// docs/design/agent.md.
+//
+// Vendored from sylva-server (cargo run --bin sync-proto); do not edit here.
+package sylva.machine.v1;
+
+message Empty {}
+
+// ── Registration ──────────────────────────────────────────────────────────────
+// Unauthenticated (peer-IP rate-limited). First contact for a machine; idempotent
+// on the machine identity key. The agent proves possession of the private key by
+// signing the request; the server verifies against `machine_identity_public`,
+// upserts the machine, and returns its id + a session token for later calls.
+message RegisterMachineRequest {
+  bytes machine_identity_public = 1;  // Ed25519 machine identity public key
+  string platform = 2;                // windows|macos|linux
+  string label = 3;                   // machine label (e.g. hostname)
+  bytes signature = 4;                // Ed25519 over (public ++ platform ++ label) — proof of possession
+}
+
+message MachineSession {
+  string machine_id = 1;
+  string token = 2;                   // opaque machine session token (slice-2 spine)
+  string expires_at = 3;              // RFC 3339
+}
+
+// ── Check-in (liveness) ───────────────────────────────────────────────────────
+// Authed. Bare liveness heartbeat — bumps last_seen_at. No device content.
+message CheckInRequest {
+  string agent_version = 1;           // operational metadata (non-PII)
+}
+
+// ── Telemetry (E2E, pushed) ───────────────────────────────────────────────────
+// Authed. Device telemetry encrypted to the device-admin group key; the server
+// stores ciphertext only. The envelope (kind/recipient/seq) is plaintext for
+// routing + ordering. Declared here — CP1 fixes the format; handled from CP3.
+message TelemetryBlob {
+  string kind = 1;                    // location|inventory|...
+  bytes recipient_key_id = 2;         // which device-admin group key
+  uint64 seq = 3;                     // per-machine sequence (ordering / anti-replay)
+  bytes ciphertext = 4;               // sealed to the group public key
+  bytes signature = 5;                // machine-signed over the envelope + ciphertext
+}
+
+message ReportTelemetryRequest {
+  repeated TelemetryBlob blobs = 1;
+}
+
+// ── Server push (the delivery network) ────────────────────────────────────────
+// Authed server-stream. Pushes config + (from CP4) commands; doubles as the
+// keep-alive. Spine: keep-alive + config only.
+message MachineConfig {
+  bool location_enabled = 1;
+}
+
+message ServerPush {
+  oneof payload {
+    Empty keep_alive = 1;
+    MachineConfig config = 2;
+    // Command command = 3;           // CP4: encrypted to the machine key, admin-signed
+  }
+}
+
+service Machine {
+  rpc RegisterMachine(RegisterMachineRequest) returns (MachineSession);
+  rpc CheckIn(CheckInRequest) returns (Empty);
+  rpc ReportTelemetry(ReportTelemetryRequest) returns (Empty);  // CP3
+  rpc Subscribe(Empty) returns (stream ServerPush);
+}
