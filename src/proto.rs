@@ -55,6 +55,7 @@ mod smoke {
         let _ = super::machine::v1::Empty {};
         let cfg = super::machine::v1::MachineConfig {
             location_enabled: true,
+            ..Default::default()
         };
         assert!(cfg.location_enabled);
     }
