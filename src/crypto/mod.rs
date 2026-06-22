@@ -35,6 +35,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 /// Domain-separation label for the Secret Key's HKDF leg.
 const HKDF_INFO: &[u8] = b"sylva.2skd.v1";
+/// Domain-separation label for the sealed-box (anonymous public-key) HKDF.
+const SEALBOX_INFO: &[u8] = b"sylva.sealedbox.v1";
 /// Per-user KDF salt size (matches `auth.md`).
 const SALT_LEN: usize = 16;
 /// Symmetric key size for the master key + all AEAD wraps.
@@ -169,6 +171,84 @@ pub fn generate_device_keypair() -> DeviceKeypair {
         public: public.to_bytes(),
         secret: Zeroizing::new(secret.to_bytes()),
     }
+}
+
+// ── Sealed box: anonymous public-key encryption (slice-2 machine telemetry) ────
+//
+// The machine plane's E2E primitive. An agent seals device telemetry to the
+// **device-admin group** public key with no admin present; an admin holding the
+// group secret (each copy itself sealed to that admin's personal X25519 key)
+// opens it. The server only ever relays ciphertext. See `docs/design/agent.md`.
+
+/// A device-admin **group** X25519 keypair. Telemetry is sealed to `public`;
+/// admins hold `secret` (each copy wrapped to their personal X25519 key via
+/// [`seal_to`]). Secret zeroized on drop.
+pub struct GroupKeypair {
+    pub public: [u8; KEY_LEN],
+    pub secret: Zeroizing<[u8; KEY_LEN]>,
+}
+
+/// Generate a fresh device-admin group X25519 keypair.
+pub fn generate_group_keypair() -> GroupKeypair {
+    let secret = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+    let public = x25519_dalek::PublicKey::from(&secret);
+    GroupKeypair {
+        public: public.to_bytes(),
+        secret: Zeroizing::new(secret.to_bytes()),
+    }
+}
+
+/// Anonymous public-key encryption (libsodium "sealed box" shape): encrypt
+/// `plaintext` so only the holder of the private key for `recipient_public` can
+/// open it, with the sender anonymous — a fresh ephemeral key per message.
+///
+/// Output: `ephemeral_public(32) || XChaCha20-Poly1305(nonce || ciphertext+tag)`.
+/// The symmetric key is HKDF-SHA256 over the ECDH shared secret, bound to both
+/// the ephemeral and recipient public keys (unique per message + recipient).
+pub fn seal_to(recipient_public: &[u8; KEY_LEN], plaintext: &[u8]) -> Result<Vec<u8>> {
+    let ephemeral = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+    let ephemeral_public = x25519_dalek::PublicKey::from(&ephemeral).to_bytes();
+    let recipient = x25519_dalek::PublicKey::from(*recipient_public);
+    let shared = ephemeral.diffie_hellman(&recipient);
+    let key = sealbox_key(shared.as_bytes(), &ephemeral_public, recipient_public)?;
+
+    let mut out = Vec::with_capacity(KEY_LEN + NONCE_LEN + plaintext.len() + 16);
+    out.extend_from_slice(&ephemeral_public);
+    out.extend_from_slice(&seal(&key, plaintext)?);
+    Ok(out)
+}
+
+/// Open a [`seal_to`] blob with the recipient's X25519 secret.
+pub fn open_sealed(recipient_secret: &[u8; KEY_LEN], blob: &[u8]) -> Result<Vec<u8>> {
+    if blob.len() < KEY_LEN {
+        return Err(CryptoError::Decrypt);
+    }
+    let (ephemeral_public, sealed) = blob.split_at(KEY_LEN);
+    let ephemeral_public: [u8; KEY_LEN] =
+        ephemeral_public.try_into().map_err(|_| CryptoError::Decrypt)?;
+
+    let secret = x25519_dalek::StaticSecret::from(*recipient_secret);
+    let recipient_public = x25519_dalek::PublicKey::from(&secret).to_bytes();
+    let shared = secret.diffie_hellman(&x25519_dalek::PublicKey::from(ephemeral_public));
+    let key = sealbox_key(shared.as_bytes(), &ephemeral_public, &recipient_public)?;
+    open(&key, sealed)
+}
+
+/// HKDF-SHA256 over the X25519 shared secret, bound to the ephemeral + recipient
+/// public keys — so the AEAD key is unique per (message, recipient).
+fn sealbox_key(
+    shared: &[u8],
+    ephemeral_public: &[u8; KEY_LEN],
+    recipient_public: &[u8; KEY_LEN],
+) -> Result<[u8; KEY_LEN]> {
+    let hk = hkdf::Hkdf::<sha2::Sha256>::new(None, shared);
+    let mut info = Vec::with_capacity(SEALBOX_INFO.len() + 2 * KEY_LEN);
+    info.extend_from_slice(SEALBOX_INFO);
+    info.extend_from_slice(ephemeral_public);
+    info.extend_from_slice(recipient_public);
+    let mut out = [0u8; KEY_LEN];
+    hk.expand(&info, &mut out).map_err(|_| CryptoError::Kdf)?;
+    Ok(out)
 }
 
 /// Bootstrap a brand-new owner identity with the default KDF params.
@@ -446,5 +526,52 @@ mod tests {
         let kp = generate_device_keypair();
         let secret = x25519_dalek::StaticSecret::from(*kp.secret);
         assert_eq!(x25519_dalek::PublicKey::from(&secret).to_bytes(), kp.public);
+    }
+
+    #[test]
+    fn sealed_box_round_trips_to_the_recipient_only() {
+        let kp = generate_group_keypair();
+        let blob = seal_to(&kp.public, b"device location blob").unwrap();
+        assert_eq!(open_sealed(&kp.secret, &blob).unwrap(), b"device location blob");
+
+        // A different keypair can't open it.
+        let other = generate_group_keypair();
+        assert!(open_sealed(&other.secret, &blob).is_err());
+        // Tampered ciphertext → fails.
+        let mut bad = blob.clone();
+        let last = bad.len() - 1;
+        bad[last] ^= 0x01;
+        assert!(open_sealed(&kp.secret, &bad).is_err());
+        // Truncated below the ephemeral pubkey → fails (not a panic).
+        assert!(open_sealed(&kp.secret, b"short").is_err());
+    }
+
+    #[test]
+    fn group_key_wraps_to_an_admin_then_telemetry_round_trips() {
+        // The device-admin group key + an admin's personal X25519 key.
+        let group = generate_group_keypair();
+        let admin = generate_device_keypair();
+
+        // Wrap the group SECRET to the admin's public key; the admin unwraps it.
+        let wrapped = seal_to(&admin.public, group.secret.as_ref()).unwrap();
+        let recovered = open_sealed(&admin.secret, &wrapped).unwrap();
+        assert_eq!(recovered.as_slice(), group.secret.as_ref());
+
+        // An agent seals telemetry to the group PUBLIC key (no admin present); the
+        // admin, now holding the group secret, decrypts it.
+        let group_secret: [u8; KEY_LEN] = recovered.try_into().unwrap();
+        let telemetry = seal_to(&group.public, br#"{"lat":1.0,"lon":2.0}"#).unwrap();
+        assert_eq!(
+            open_sealed(&group_secret, &telemetry).unwrap(),
+            br#"{"lat":1.0,"lon":2.0}"#
+        );
+    }
+
+    #[test]
+    fn each_seal_is_unique() {
+        let kp = generate_group_keypair();
+        let a = seal_to(&kp.public, b"same plaintext").unwrap();
+        let b = seal_to(&kp.public, b"same plaintext").unwrap();
+        assert_ne!(a, b, "fresh ephemeral key + nonce per message");
     }
 }
