@@ -1,7 +1,6 @@
 //! # Sylva SDK
 //!
-//! The shared Rust client core every Sylva client (Sylva Hub first) builds on
-//! to talk to a Hearth server. See `design/hub.md` + `docs/dev/hub-build-spec.md`
+//! The shared Rust client core every Sylva client builds on to talk to a Sylva Server. See `design/hub.md` + `docs/dev/hub-build-spec.md`
 //! in the workspace for the full picture.
 //!
 //! **Scope so far:**
@@ -20,7 +19,7 @@
 //!   user operations: create the first owner, sign in (+ unlock), manage devices.
 //! - [`storage`] (Phase 3.4) — per-OS-user keychain persistence of the enrollment
 //!   secrets + server profile, so a device stays enrolled across launches.
-//! - [`client`] (Phase 3.6) — the high-level [`client::SylvaClient`] facade the
+//! - [`client`] (Phase 3.6) — the high-level [`client::Client`] facade the
 //!   native shell drives: a stateful handle composing transport + flows +
 //!   storage into connect / create-owner / sign-in / device-management calls.
 //!   (The `uniffi` boundary + a blocking wrapper expose it to C# next.)

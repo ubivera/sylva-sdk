@@ -1,5 +1,5 @@
 //! `sync-proto` — re-vendor the canonical `.proto` files from the sibling
-//! sylva-server repo into this crate's `proto/` tree. Run after Hearth's proto
+//! sylva-server repo into this crate's `proto/` tree. Run after Sylva Server's proto
 //! contract changes, then rebuild (build.rs regenerates the stubs) and commit
 //! the updated `proto/`.
 //!

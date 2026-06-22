@@ -1,4 +1,4 @@
-//! Generated gRPC **client** stubs for the Hearth APIs (`sylva.account.v1` +
+//! Generated gRPC **client** stubs for the Sylva Server APIs (`sylva.account.v1` +
 //! `sylva.platform.v1`), produced by `build.rs` from the vendored `proto/`.
 //!
 //! This is codegen output (tonic-prost-build), not hand-audited code, so it
@@ -17,6 +17,12 @@ pub mod account {
 pub mod platform {
     pub mod v1 {
         include!(concat!(env!("OUT_DIR"), "/sylva.platform.v1.rs"));
+    }
+}
+
+pub mod machine {
+    pub mod v1 {
+        include!(concat!(env!("OUT_DIR"), "/sylva.machine.v1.rs"));
     }
 }
 
@@ -41,5 +47,15 @@ mod smoke {
             id: "r1".to_string(),
         };
         assert_eq!(resource.id, "r1");
+    }
+
+    #[test]
+    fn machine_types_are_generated() {
+        let _ = super::machine::v1::RegisterMachineRequest::default();
+        let _ = super::machine::v1::Empty {};
+        let cfg = super::machine::v1::MachineConfig {
+            location_enabled: true,
+        };
+        assert!(cfg.location_enabled);
     }
 }

@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-// Canonical wire contract for the Sylva Hearth platform API. Lives at the repo
+// Canonical wire contract for the Sylva Server platform API. Lives at the repo
 // root (not inside a crate) so the future `sylva-sdk` can consume it via a git
 // submodule. The `proto` crate generates Rust stubs from this.
 package sylva.platform.v1;

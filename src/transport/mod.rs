@@ -1,4 +1,4 @@
-//! Transport: finding a Hearth server and anchoring trust in it.
+//! Transport: finding a Sylva Server and anchoring trust in it.
 //!
 //! So far: the **discovery** verification + TOFU pinning (the client half of the
 //! `/.well-known/sylva-discovery` handshake). The HTTP fetch, endpoint-list

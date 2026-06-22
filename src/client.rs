@@ -1,4 +1,4 @@
-//! [`SylvaClient`] — the high-level client facade the native shell drives. A
+//! [`Client`] — the high-level client facade the native shell drives. A
 //! single stateful handle that composes the [transport](crate::transport),
 //! [flows](crate::flows), and [storage](crate::storage) into the operations the
 //! Connect → Create-owner / Sign-in → Name-device → My-devices screens need.
@@ -50,7 +50,7 @@ pub enum TrustStatus {
     Trusted,
 }
 
-/// What [`SylvaClient::connect`] learned, for the Connect screen's confirm step.
+/// What [`Client::connect`] learned, for the Connect screen's confirm step.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct ConnectInfo {
@@ -104,12 +104,12 @@ struct Inner {
 }
 
 /// The stateful client handle the shell holds for the lifetime of the app.
-pub struct SylvaClient {
+pub struct Client {
     inner: Mutex<Inner>,
     vault: Vault<Box<dyn SecretStore + Send + Sync>>,
 }
 
-impl SylvaClient {
+impl Client {
     /// Production constructor: secrets live in the OS keychain under `service`
     /// (e.g. `"sylva-client"`), scoped to the current OS user.
     pub fn new(service: impl Into<String>) -> Self {
@@ -300,12 +300,79 @@ impl SylvaClient {
         Ok(())
     }
 
-    /// Sign out: wipe the keychain + drop all in-memory secrets.
+    /// Sign out of the active session but keep this device enrolled: drops the
+    /// in-memory state, the cached session token, and the unwrapped master key, so
+    /// a return needs only the password (the Secret Key, device key, and pinned
+    /// server stay cached). Use [`forget_server`](Self::forget_server) for a full wipe.
     pub async fn sign_out(&self) -> Result<()> {
+        self.vault.clear_session().map_err(|_| ClientError::Storage)?;
+        let mut inner = self.inner.lock().await;
+        *inner = Inner::default();
+        Ok(())
+    }
+
+    /// Forget this server entirely: wipe every cached secret + the pinned identity
+    /// and drop in-memory state. The device must re-enroll (Secret Key) to return.
+    /// This is also the reset for a changed server identity (clears the stale pin).
+    pub async fn forget_server(&self) -> Result<()> {
         self.vault.clear().map_err(|_| ClientError::Storage)?;
         let mut inner = self.inner.lock().await;
         *inner = Inner::default();
         Ok(())
+    }
+
+    /// Auto-resume a prior session on launch. If this OS user's keychain holds an
+    /// enrollment, reconnect to the pinned server and rebuild the authenticated
+    /// session from the cached token — no password needed. Returns the user id, or
+    /// `None` if there's nothing to resume or the server can't be reached/verified
+    /// (the shell then shows Connect, which re-surfaces a real identity mismatch).
+    ///
+    /// ponytail: rebuilds only the gRPC session (enough for device management); the
+    /// unlocked identity for data decryption is NOT restored — add when a screen
+    /// needs to decrypt without a fresh sign-in. The resume path needs a live
+    /// discovery server (cross-stack e2e / manual); the unit test covers the
+    /// nothing-to-resume branch.
+    pub async fn restore(&self) -> Result<Option<String>> {
+        let profile = match self.vault.server_profile().map_err(|_| ClientError::Storage)? {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let token = match self.vault.session_token().map_err(|_| ClientError::Storage)? {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+
+        // The cached endpoint is "host:discovery_port" (see connect()).
+        let endpoint = match profile.endpoints.first() {
+            Some(e) => e.clone(),
+            None => return Ok(None),
+        };
+        let Some((host, port)) = endpoint.rsplit_once(':') else {
+            return Ok(None);
+        };
+        let Ok(discovery_port) = port.parse::<u16>() else {
+            return Ok(None);
+        };
+
+        // Re-verify the pin on reconnect; any failure (offline, changed identity)
+        // means we can't auto-resume — fall back to Connect rather than erroring.
+        let (channel, verified, _decision) = match transport::discover_and_connect(
+            host,
+            discovery_port,
+            Some(&profile.identity_public),
+        )
+        .await
+        {
+            Ok(t) => t,
+            Err(_) => return Ok(None),
+        };
+
+        let mut inner = self.inner.lock().await;
+        inner.endpoints = profile.endpoints.clone();
+        inner.session = Some(AccountSession::new(channel.clone(), token));
+        inner.verified = Some(verified);
+        inner.channel = Some(channel);
+        Ok(Some(profile.user_id))
     }
 
     /// Cache the post-auth state in the keychain.
@@ -327,7 +394,7 @@ impl SylvaClient {
     }
 }
 
-/// The post-auth state to cache (bundled to keep [`SylvaClient::persist`] tidy).
+/// The post-auth state to cache (bundled to keep [`Client::persist`] tidy).
 /// `device_secret` is `Some` only when the call enrolled a device (bootstrap).
 struct ToCache<'a> {
     identity_public: [u8; 32],
@@ -515,7 +582,7 @@ mod tests {
     /// Inject a connected channel + a verified server, bypassing discovery (which
     /// needs an HTTP server; covered by the cross-stack e2e). Lets the facade's
     /// post-connect flows be tested against a mock gRPC server.
-    async fn inject(client: &SylvaClient, addr: &str) {
+    async fn inject(client: &Client, addr: &str) {
         let channel = transport::connect(&[addr.to_string()]).await.unwrap();
         let mut inner = client.inner.lock().await;
         inner.channel = Some(channel);
@@ -531,7 +598,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn create_owner_caches_state_and_manages_devices() {
         let (addr, shutdown) = spawn(pb::KeyMaterial::default()).await;
-        let client = SylvaClient::with_store(Box::new(MemoryStore::new()));
+        let client = Client::with_store(Box::new(MemoryStore::new()));
         inject(&client, &addr).await;
 
         let enrollment = client
@@ -556,9 +623,17 @@ mod tests {
         assert_eq!(added.label, "Laptop");
         client.revoke_device("dev-1").await.unwrap();
 
-        // Sign-out wipes the keychain.
+        // Light sign-out drops the session + master key but keeps the device
+        // enrolled (Secret Key + server profile stay) — a return needs only the password.
         client.sign_out().await.unwrap();
         assert!(client.vault.master_key().unwrap().is_none());
+        assert!(client.vault.session_token().unwrap().is_none());
+        assert!(client.vault.secret_key().unwrap().is_some());
+        assert!(client.vault.server_profile().unwrap().is_some());
+
+        // Forget-server is the full wipe.
+        client.forget_server().await.unwrap();
+        assert!(client.vault.secret_key().unwrap().is_none());
         assert!(client.vault.server_profile().unwrap().is_none());
 
         let _ = shutdown.send(());
@@ -570,7 +645,7 @@ mod tests {
         let boot = crypto::bootstrap_identity_with_params("pw", fast()).unwrap();
         let secret_key_str = boot.secret_key.display();
         let (addr, shutdown) = spawn(key_material(&boot.bundle)).await;
-        let client = SylvaClient::with_store(Box::new(MemoryStore::new()));
+        let client = Client::with_store(Box::new(MemoryStore::new()));
         inject(&client, &addr).await;
 
         // New-device sign-in: the user supplies the Secret Key.
@@ -590,7 +665,7 @@ mod tests {
     async fn sign_in_wrong_secret_key_fails() {
         let boot = crypto::bootstrap_identity_with_params("pw", fast()).unwrap();
         let (addr, shutdown) = spawn(key_material(&boot.bundle)).await;
-        let client = SylvaClient::with_store(Box::new(MemoryStore::new()));
+        let client = Client::with_store(Box::new(MemoryStore::new()));
         inject(&client, &addr).await;
 
         let wrong = SecretKey::generate().display();
@@ -601,8 +676,14 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn restore_without_enrollment_is_none() {
+        let client = Client::with_store(Box::new(MemoryStore::new()));
+        assert!(client.restore().await.unwrap().is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn calls_before_connect_or_signin_are_rejected() {
-        let client = SylvaClient::with_store(Box::new(MemoryStore::new()));
+        let client = Client::with_store(Box::new(MemoryStore::new()));
         assert!(matches!(
             client.create_owner("o@x", "O", "pw", "PC").await,
             Err(ClientError::NotConnected)

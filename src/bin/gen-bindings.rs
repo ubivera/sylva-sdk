@@ -1,4 +1,4 @@
-//! `gen-bindings` — generate the C# bindings (+ the native library) for the Hub
+//! `gen-bindings` — generate the C# bindings (+ the native library) for the client
 //! shells from the sylva-sdk FFI surface. Builds the `ffi`-feature cdylib, runs
 //! `uniffi-bindgen-cs`, and copies the native library into the output dir.
 //!

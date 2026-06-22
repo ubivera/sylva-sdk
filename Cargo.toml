@@ -3,7 +3,7 @@ name = "sylva-sdk"
 version = "0.0.1"
 edition = "2024"
 rust-version = "1.95"
-description = "Sylva client SDK — shared Rust core for Hearth clients (transport, 2SKD crypto, device enrollment). First consumed by Sylva Hub."
+description = "Sylva client SDK — shared Rust core for Sylva Server clients (transport, 2SKD crypto, device enrollment). First consumed by Sylva Hub."
 # License intentionally unset for now (deferred — see design/repos.md §Considerations).
 publish = false
 

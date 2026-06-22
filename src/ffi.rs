@@ -1,7 +1,7 @@
-//! The uniffi boundary for native shells (Sylva Hub) — feature `ffi`.
+//! The uniffi boundary for the native client shells — feature `ffi`.
 //!
-//! [`SylvaHub`] is the opaque object the shell binds to. It wraps the async
-//! [`SylvaClient`] facade behind a **blocking** API (it owns a tokio runtime and
+//! [`SylvaClient`] is the opaque object the shell binds to. It wraps the async
+//! [`Client`] facade behind a **blocking** API (it owns a tokio runtime and
 //! `block_on`s each call), because the chosen C# binding generator
 //! (`uniffi-bindgen-cs`) handles synchronous calls most reliably. The shell
 //! invokes these off its UI thread.
@@ -15,20 +15,20 @@ use std::sync::Arc;
 use tokio::runtime::Runtime;
 
 use crate::client::{
-    ClientError, ConnectInfo, DeviceInfo, Enrollment, SignInOutcome, SylvaClient,
+    Client, ClientError, ConnectInfo, DeviceInfo, Enrollment, SignInOutcome,
 };
 
-/// The shell-facing handle: a blocking wrapper over [`SylvaClient`] with its own
-/// runtime. Held for the app's lifetime.
+/// The shell-facing handle: a blocking wrapper over the async [`Client`] facade
+/// with its own runtime. Held for the app's lifetime.
 #[derive(uniffi::Object)]
-pub struct SylvaHub {
+pub struct SylvaClient {
     runtime: Runtime,
-    client: SylvaClient,
+    client: Client,
 }
 
 #[uniffi::export]
-impl SylvaHub {
-    /// Create a hub whose secrets live in the OS keychain under `service`
+impl SylvaClient {
+    /// Create a client whose secrets live in the OS keychain under `service`
     /// (e.g. `"sylva-client"`), scoped to the current OS user.
     #[uniffi::constructor]
     pub fn new(service: String) -> Result<Arc<Self>, ClientError> {
@@ -38,11 +38,11 @@ impl SylvaHub {
             .map_err(|_| ClientError::Server)?;
         Ok(Arc::new(Self {
             runtime,
-            client: SylvaClient::new(service),
+            client: Client::new(service),
         }))
     }
 
-    /// Discover + verify + connect a server (TOFU). See [`SylvaClient::connect`].
+    /// Discover + verify + connect a server (TOFU). See [`Client::connect`].
     pub fn connect(&self, host: String, discovery_port: u16) -> Result<ConnectInfo, ClientError> {
         self.runtime
             .block_on(self.client.connect(&host, discovery_port))
@@ -93,9 +93,22 @@ impl SylvaHub {
             .block_on(self.client.revoke_device(&device_id))
     }
 
-    /// Sign out: wipe the keychain + drop in-memory secrets.
+    /// Sign out of the active session, keeping this device enrolled (see
+    /// [`Client::sign_out`]). A return needs only the password.
     pub fn sign_out(&self) -> Result<(), ClientError> {
         self.runtime.block_on(self.client.sign_out())
+    }
+
+    /// Forget this server entirely — full wipe; re-enroll (Secret Key) to return
+    /// (see [`Client::forget_server`]).
+    pub fn forget_server(&self) -> Result<(), ClientError> {
+        self.runtime.block_on(self.client.forget_server())
+    }
+
+    /// Auto-resume a prior session on launch (see [`Client::restore`]). Returns the
+    /// user id if resumed, else `None` (the shell then shows Connect).
+    pub fn restore(&self) -> Result<Option<String>, ClientError> {
+        self.runtime.block_on(self.client.restore())
     }
 }
 
@@ -105,12 +118,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hub_constructs_and_guards_before_connect() {
-        let hub = SylvaHub::new("sylva-sdk-ffi-test".to_string()).unwrap();
+    fn client_constructs_and_guards_before_connect() {
+        let client = SylvaClient::new("sylva-sdk-ffi-test".to_string()).unwrap();
         // A call before connecting drives the async facade to completion (via the
         // internal runtime) and surfaces the guard error — proving the blocking
         // wrapper + delegation work end to end.
-        let err = hub
+        let err = client
             .create_owner(
                 "o@x".to_string(),
                 "O".to_string(),
