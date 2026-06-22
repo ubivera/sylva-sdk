@@ -131,11 +131,21 @@ impl<S: SecretStore> Vault<S> {
         }
     }
 
-    /// Wipe all stored secrets + the profile (sign-out / device revoke).
+    /// Wipe all stored secrets + the profile (forget-this-server / device revoke).
     pub fn clear(&self) -> Result<()> {
         for key in [MASTER_KEY, SECRET_KEY, DEVICE_SECRET, SESSION_TOKEN, SERVER_PROFILE] {
             self.store.delete(key)?;
         }
+        Ok(())
+    }
+
+    /// Clear just the active session: the session token + the unwrapped master
+    /// key. Keeps the Secret Key, device key, and server profile, so the device
+    /// stays enrolled and a return needs only the password ([`clear`](Self::clear)
+    /// is the full forget-this-server wipe).
+    pub fn clear_session(&self) -> Result<()> {
+        self.store.delete(SESSION_TOKEN)?;
+        self.store.delete(MASTER_KEY)?;
         Ok(())
     }
 }
@@ -272,6 +282,33 @@ mod tests {
         vault.clear().unwrap();
         assert!(vault.session_token().unwrap().is_none());
         assert!(vault.device_secret().unwrap().is_none());
+    }
+
+    #[test]
+    fn clear_session_keeps_the_device_enrolled() {
+        let vault = Vault::new(MemoryStore::new());
+        let boot = crypto::bootstrap_identity_with_params("pw", fast()).unwrap();
+        vault.set_master_key(&boot.identity.master_key).unwrap();
+        vault.set_secret_key(&boot.secret_key).unwrap();
+        vault.set_session_token("t").unwrap();
+        vault.set_device_secret(&[1u8; 32]).unwrap();
+        vault
+            .set_server_profile(&ServerProfile {
+                endpoints: vec!["h:1".to_string()],
+                identity_public: [9u8; 32],
+                user_id: "u".to_string(),
+            })
+            .unwrap();
+
+        vault.clear_session().unwrap();
+
+        // Session is gone...
+        assert!(vault.session_token().unwrap().is_none());
+        assert!(vault.master_key().unwrap().is_none());
+        // ...but the device stays enrolled (return needs only the password).
+        assert!(vault.secret_key().unwrap().is_some());
+        assert!(vault.device_secret().unwrap().is_some());
+        assert!(vault.server_profile().unwrap().is_some());
     }
 
     #[test]

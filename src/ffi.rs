@@ -93,9 +93,22 @@ impl SylvaClient {
             .block_on(self.client.revoke_device(&device_id))
     }
 
-    /// Sign out: wipe the keychain + drop in-memory secrets.
+    /// Sign out of the active session, keeping this device enrolled (see
+    /// [`Client::sign_out`]). A return needs only the password.
     pub fn sign_out(&self) -> Result<(), ClientError> {
         self.runtime.block_on(self.client.sign_out())
+    }
+
+    /// Forget this server entirely — full wipe; re-enroll (Secret Key) to return
+    /// (see [`Client::forget_server`]).
+    pub fn forget_server(&self) -> Result<(), ClientError> {
+        self.runtime.block_on(self.client.forget_server())
+    }
+
+    /// Auto-resume a prior session on launch (see [`Client::restore`]). Returns the
+    /// user id if resumed, else `None` (the shell then shows Connect).
+    pub fn restore(&self) -> Result<Option<String>, ClientError> {
+        self.runtime.block_on(self.client.restore())
     }
 }
 
