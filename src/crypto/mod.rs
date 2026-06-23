@@ -328,6 +328,40 @@ pub fn unlock_identity(
     })
 }
 
+/// A master key re-wrapped under a new password (the password-change output):
+/// the new ciphertext + the fresh salt + the params used. Maps onto the
+/// `ChangePassword` request's `new_master_key_wrapped` / `new_kdf_salt` /
+/// `new_kdf_params` fields.
+pub struct RewrappedMaster {
+    pub master_key_wrapped: Vec<u8>,
+    pub kdf_salt: Vec<u8>,
+    pub kdf_params: String,
+}
+
+/// Re-wrap the master key under a new password (password change). Generates a
+/// fresh salt, derives `KEK = derive_kek(new_password, secret_key, salt,
+/// params)`, and seals the *same* master key under it.
+///
+/// The master key itself doesn't change, so the private keys (wrapped under the
+/// master key) are untouched — only `master_key_wrapped` + salt + params rotate.
+/// The Secret Key is unchanged too: it remains the second 2SKD factor.
+pub fn rewrap_master_key(
+    master_key: &MasterKey,
+    secret_key: &SecretKey,
+    new_password: &str,
+    params: KdfParams,
+) -> Result<RewrappedMaster> {
+    let mut salt = [0u8; SALT_LEN];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut salt);
+    let kek = derive_kek(new_password.as_bytes(), secret_key, &salt, params)?;
+    let master_key_wrapped = seal(&kek, master_key.as_bytes())?;
+    Ok(RewrappedMaster {
+        master_key_wrapped,
+        kdf_salt: salt.to_vec(),
+        kdf_params: params.to_json()?,
+    })
+}
+
 /// The 2SKD KEK: `Argon2id(password, salt) XOR HKDF-SHA256(secret_key, salt)`.
 fn derive_kek(
     password: &[u8],
@@ -486,6 +520,49 @@ mod tests {
             ed.verifying_key().to_bytes().to_vec(),
             out.bundle.ed25519_public
         );
+    }
+
+    #[test]
+    fn rewrap_master_key_changes_the_password_only() {
+        // Bootstrap under the old password, then unlock to recover the master key.
+        let out = bootstrap_identity_with_params("old", fast()).unwrap();
+        let unlocked = unlock_identity(&out.bundle, "old", &out.secret_key).unwrap();
+        let original_master = *unlocked.master_key.as_bytes();
+
+        // Re-wrap the master key under a new password (fresh salt/params).
+        let rewrapped =
+            rewrap_master_key(&unlocked.master_key, &out.secret_key, "new", fast()).unwrap();
+        // The rotated wrap differs from the original (fresh salt → fresh KEK).
+        assert_ne!(rewrapped.master_key_wrapped, out.bundle.master_key_wrapped);
+        assert_ne!(rewrapped.kdf_salt, out.bundle.kdf_salt);
+
+        // Build the post-change bundle: swap in the rewrapped master-key fields;
+        // the private-key wraps are unchanged (master key didn't change).
+        let new_bundle = KeyBundle {
+            master_key_wrapped: rewrapped.master_key_wrapped,
+            kdf_salt: rewrapped.kdf_salt,
+            kdf_params: rewrapped.kdf_params,
+            ..out.bundle.clone()
+        };
+
+        // The new password (+ unchanged Secret Key) unlocks to the SAME master key…
+        let reunlocked = unlock_identity(&new_bundle, "new", &out.secret_key).unwrap();
+        assert_eq!(reunlocked.master_key.as_bytes(), &original_master);
+        // …and the private keys still recover (proves the wraps survived intact).
+        assert_eq!(
+            reunlocked.user_x25519_secret, unlocked.user_x25519_secret,
+            "x25519 private key recovered after re-wrap"
+        );
+        assert_eq!(
+            reunlocked.user_ed25519_secret, unlocked.user_ed25519_secret,
+            "ed25519 private key recovered after re-wrap"
+        );
+
+        // The old password no longer opens the re-wrapped bundle.
+        assert!(matches!(
+            unlock_identity(&new_bundle, "old", &out.secret_key),
+            Err(CryptoError::Decrypt)
+        ));
     }
 
     #[test]

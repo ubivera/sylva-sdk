@@ -10,7 +10,7 @@
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
 
-use crate::crypto::{self, MasterKey, SecretKey, UnlockedIdentity};
+use crate::crypto::{self, KdfParams, MasterKey, SecretKey, UnlockedIdentity};
 use crate::flows::{self, NewOwner};
 use crate::proto::account::v1 as pb;
 use crate::storage::{OsKeychain, SecretStore, ServerProfile, Vault};
@@ -79,6 +79,17 @@ pub struct DeviceInfo {
     pub platform: String,
     pub created_at: String,
     pub revoked: bool,
+}
+
+/// The signed-in user's profile, for the account-settings screen.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct Profile {
+    pub user_id: String,
+    pub email: String,
+    pub display_name: String,
+    /// `owner` | `admin` | `member`.
+    pub instance_role: String,
 }
 
 /// The outcome of a sign-in attempt.
@@ -300,6 +311,78 @@ impl Client {
         Ok(())
     }
 
+    /// This account's profile (for the account-settings screen).
+    pub async fn get_profile(&self) -> Result<Profile> {
+        let mut inner = self.inner.lock().await;
+        let session = inner.session.as_mut().ok_or(ClientError::NotSignedIn)?;
+        let profile = session.get_profile().await.map_err(|_| ClientError::Server)?;
+        Ok(profile_info(profile))
+    }
+
+    /// Change this account's display name; returns the updated profile.
+    pub async fn update_display_name(&self, display_name: &str) -> Result<Profile> {
+        let mut inner = self.inner.lock().await;
+        let session = inner.session.as_mut().ok_or(ClientError::NotSignedIn)?;
+        let profile = session
+            .update_display_name(display_name.to_string())
+            .await
+            .map_err(|_| ClientError::Server)?;
+        Ok(profile_info(profile))
+    }
+
+    /// Change this account's email (re-auth: current password); returns the
+    /// updated profile.
+    pub async fn update_email(&self, new_email: &str, current_password: &str) -> Result<Profile> {
+        let mut inner = self.inner.lock().await;
+        let session = inner.session.as_mut().ok_or(ClientError::NotSignedIn)?;
+        let profile = session
+            .update_email(new_email.to_string(), current_password.to_string())
+            .await
+            .map_err(|_| ClientError::Server)?;
+        Ok(profile_info(profile))
+    }
+
+    /// Change this account's password. Fetches the current wrapped bundle,
+    /// unlocks it with the *current* password + the cached Secret Key (this is
+    /// the local check of the old password), re-wraps the master key under the
+    /// new password, and hands the server the new verifier + re-wrap. The master
+    /// key and Secret Key are unchanged, so nothing in the vault needs rewriting.
+    pub async fn change_password(&self, current_password: &str, new_password: &str) -> Result<()> {
+        // The cached Secret Key is the unchanged second 2SKD factor.
+        let secret_key = self
+            .vault
+            .secret_key()
+            .map_err(|_| ClientError::Storage)?
+            .ok_or(ClientError::SecretKeyRequired)?;
+
+        let mut inner = self.inner.lock().await;
+        let session = inner.session.as_mut().ok_or(ClientError::NotSignedIn)?;
+
+        // Fetch the current bundle and unlock with the *current* password — this
+        // verifies the old password locally (wrong password → Crypto).
+        let material = session.key_material().await.map_err(|_| ClientError::Server)?;
+        let bundle = key_material_to_bundle(material);
+        let unlocked = crypto::unlock_identity(&bundle, current_password, &secret_key)
+            .map_err(|_| ClientError::Crypto)?;
+
+        // Re-wrap the (unchanged) master key under the new password.
+        let rewrapped =
+            crypto::rewrap_master_key(&unlocked.master_key, &secret_key, new_password, KdfParams::default())
+                .map_err(|_| ClientError::Crypto)?;
+
+        session
+            .change_password(pb::ChangePasswordRequest {
+                current_password: current_password.to_string(),
+                new_password: new_password.to_string(),
+                new_master_key_wrapped: rewrapped.master_key_wrapped,
+                new_kdf_salt: rewrapped.kdf_salt,
+                new_kdf_params: rewrapped.kdf_params,
+            })
+            .await
+            .map_err(map_change_password_err)?;
+        Ok(())
+    }
+
     /// Sign out of the active session but keep this device enrolled: drops the
     /// in-memory state, the cached session token, and the unwrapped master key, so
     /// a return needs only the password (the Secret Key, device key, and pinned
@@ -431,6 +514,43 @@ fn device_info(d: pb::Device) -> DeviceInfo {
     }
 }
 
+fn profile_info(p: pb::Profile) -> Profile {
+    Profile {
+        user_id: p.user_id,
+        email: p.email,
+        display_name: p.display_name,
+        instance_role: p.instance_role,
+    }
+}
+
+/// The wire `KeyMaterial` → local `KeyBundle` (the facade's copy of the bridge in
+/// [`crate::flows`]; only the `change_password` re-wrap needs it here).
+fn key_material_to_bundle(m: pb::KeyMaterial) -> crypto::KeyBundle {
+    crypto::KeyBundle {
+        x25519_public: m.x25519_public,
+        ed25519_public: m.ed25519_public,
+        x25519_private_wrapped: m.x25519_private_wrapped,
+        ed25519_private_wrapped: m.ed25519_private_wrapped,
+        master_key_wrapped: m.master_key_wrapped,
+        kdf_salt: m.kdf_salt,
+        kdf_params: m.kdf_params,
+    }
+}
+
+/// Map a `ChangePassword` RPC failure: the server rejects a wrong *current*
+/// password with `unauthenticated` (surfaced as `Crypto`, consistent with the
+/// local unlock failure); anything else is a coarse `Server` error.
+fn map_change_password_err(err: crate::transport::ClientError) -> ClientError {
+    match err {
+        crate::transport::ClientError::Rpc(status)
+            if status.code() == tonic::Code::Unauthenticated =>
+        {
+            ClientError::Crypto
+        }
+        _ => ClientError::Server,
+    }
+}
+
 fn hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -550,6 +670,54 @@ mod tests {
         ) -> std::result::Result<Response<pb::Session>, Status> {
             Err(Status::unimplemented("mock"))
         }
+        async fn get_profile(
+            &self,
+            req: Request<pb::Empty>,
+        ) -> std::result::Result<Response<pb::Profile>, Status> {
+            require_token(&req)?;
+            Ok(Response::new(pb::Profile {
+                user_id: "u-1".to_string(),
+                email: "o@x".to_string(),
+                display_name: "Olivia".to_string(),
+                instance_role: "owner".to_string(),
+            }))
+        }
+        async fn update_display_name(
+            &self,
+            req: Request<pb::UpdateDisplayNameRequest>,
+        ) -> std::result::Result<Response<pb::Profile>, Status> {
+            require_token(&req)?;
+            Ok(Response::new(pb::Profile {
+                user_id: "u-1".to_string(),
+                email: "o@x".to_string(),
+                display_name: req.into_inner().display_name,
+                instance_role: "owner".to_string(),
+            }))
+        }
+        async fn update_email(
+            &self,
+            req: Request<pb::UpdateEmailRequest>,
+        ) -> std::result::Result<Response<pb::Profile>, Status> {
+            require_token(&req)?;
+            Ok(Response::new(pb::Profile {
+                user_id: "u-1".to_string(),
+                email: req.into_inner().new_email,
+                display_name: "Olivia".to_string(),
+                instance_role: "owner".to_string(),
+            }))
+        }
+        async fn change_password(
+            &self,
+            req: Request<pb::ChangePasswordRequest>,
+        ) -> std::result::Result<Response<pb::Empty>, Status> {
+            require_token(&req)?;
+            // The client must hand back a non-empty 2SKD re-wrap of the master key.
+            let r = req.into_inner();
+            if r.new_master_key_wrapped.is_empty() || r.new_kdf_salt.is_empty() {
+                return Err(Status::invalid_argument("missing re-wrap"));
+            }
+            Ok(Response::new(pb::Empty {}))
+        }
     }
 
     async fn spawn(key_material: pb::KeyMaterial) -> (String, tokio::sync::oneshot::Sender<()>) {
@@ -657,6 +825,32 @@ mod tests {
         // The cached Secret Key now lets a returning sign-in omit it.
         assert!(client.vault.secret_key().unwrap().is_some());
         assert_eq!(client.vault.session_token().unwrap().as_deref(), Some(TOKEN));
+
+        let _ = shutdown.send(());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn change_password_rewraps_and_calls_the_server() {
+        // Sign in first so the Secret Key + session are cached, then change the
+        // password. The mock serves a real bundle, so the local unlock (old
+        // password check) and re-wrap both run for real.
+        let boot = crypto::bootstrap_identity_with_params("pw", fast()).unwrap();
+        let secret_key_str = boot.secret_key.display();
+        let (addr, shutdown) = spawn(key_material(&boot.bundle)).await;
+        let client = Client::with_store(Box::new(MemoryStore::new()));
+        inject(&client, &addr).await;
+
+        client
+            .sign_in("o@x", "pw", Some(&secret_key_str))
+            .await
+            .unwrap();
+
+        // Right current password → succeeds (the mock asserts a non-empty re-wrap).
+        client.change_password("pw", "new-pw").await.unwrap();
+
+        // Wrong current password → the local unlock fails → Crypto (no server call).
+        let err = client.change_password("wrong", "new-pw").await.unwrap_err();
+        assert!(matches!(err, ClientError::Crypto));
 
         let _ = shutdown.send(());
     }

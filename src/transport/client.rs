@@ -129,6 +129,40 @@ impl AccountSession {
         self.client.revoke_device(request).await?;
         Ok(())
     }
+
+    /// The caller's profile (public identity fields only).
+    pub async fn get_profile(&mut self) -> Result<pb::Profile> {
+        Ok(self.client.get_profile(self.authed(pb::Empty {})).await?.into_inner())
+    }
+
+    /// Change the caller's display name; returns the updated profile.
+    pub async fn update_display_name(&mut self, display_name: impl Into<String>) -> Result<pb::Profile> {
+        let request = self.authed(pb::UpdateDisplayNameRequest {
+            display_name: display_name.into(),
+        });
+        Ok(self.client.update_display_name(request).await?.into_inner())
+    }
+
+    /// Change the caller's email (re-auth: current password); returns the
+    /// updated profile.
+    pub async fn update_email(
+        &mut self,
+        new_email: impl Into<String>,
+        current_password: impl Into<String>,
+    ) -> Result<pb::Profile> {
+        let request = self.authed(pb::UpdateEmailRequest {
+            new_email: new_email.into(),
+            current_password: current_password.into(),
+        });
+        Ok(self.client.update_email(request).await?.into_inner())
+    }
+
+    /// Change the caller's password: the server recomputes its verifier from
+    /// `new_password` and stores the client's 2SKD re-wrap of the master key.
+    pub async fn change_password(&mut self, request: pb::ChangePasswordRequest) -> Result<()> {
+        self.client.change_password(self.authed(request)).await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -261,6 +295,53 @@ mod tests {
             require_token(&req)?;
             Ok(Response::new(pb::Empty {}))
         }
+
+        async fn get_profile(
+            &self,
+            req: Request<pb::Empty>,
+        ) -> std::result::Result<Response<pb::Profile>, Status> {
+            require_token(&req)?;
+            Ok(Response::new(pb::Profile {
+                user_id: "11111111-1111-1111-1111-111111111111".to_string(),
+                email: "olivia@test.local".to_string(),
+                display_name: "Olivia".to_string(),
+                instance_role: "owner".to_string(),
+            }))
+        }
+
+        async fn update_display_name(
+            &self,
+            req: Request<pb::UpdateDisplayNameRequest>,
+        ) -> std::result::Result<Response<pb::Profile>, Status> {
+            require_token(&req)?;
+            Ok(Response::new(pb::Profile {
+                user_id: "11111111-1111-1111-1111-111111111111".to_string(),
+                email: "olivia@test.local".to_string(),
+                display_name: req.into_inner().display_name,
+                instance_role: "owner".to_string(),
+            }))
+        }
+
+        async fn update_email(
+            &self,
+            req: Request<pb::UpdateEmailRequest>,
+        ) -> std::result::Result<Response<pb::Profile>, Status> {
+            require_token(&req)?;
+            Ok(Response::new(pb::Profile {
+                user_id: "11111111-1111-1111-1111-111111111111".to_string(),
+                email: req.into_inner().new_email,
+                display_name: "Olivia".to_string(),
+                instance_role: "owner".to_string(),
+            }))
+        }
+
+        async fn change_password(
+            &self,
+            req: Request<pb::ChangePasswordRequest>,
+        ) -> std::result::Result<Response<pb::Empty>, Status> {
+            require_token(&req)?;
+            Ok(Response::new(pb::Empty {}))
+        }
     }
 
     /// Spin up the mock on an ephemeral port; returns its `host:port` + a
@@ -319,6 +400,26 @@ mod tests {
         assert_eq!(enrolled.device_label, "Laptop");
 
         account.revoke_device("dev-1").await.unwrap();
+
+        // Account self-service round-trips: read the profile, update name + email,
+        // and change the password (all authed; the mock asserts the bearer token).
+        let profile = account.get_profile().await.unwrap();
+        assert_eq!(profile.display_name, "Olivia");
+        assert_eq!(profile.instance_role, "owner");
+        let renamed = account.update_display_name("Liv").await.unwrap();
+        assert_eq!(renamed.display_name, "Liv");
+        let remailed = account.update_email("liv@x", "pw").await.unwrap();
+        assert_eq!(remailed.email, "liv@x");
+        account
+            .change_password(pb::ChangePasswordRequest {
+                current_password: "pw".to_string(),
+                new_password: "pw2".to_string(),
+                new_master_key_wrapped: vec![9u8; 72],
+                new_kdf_salt: vec![8u8; 16],
+                new_kdf_params: r#"{"m":65536,"t":3,"p":4}"#.to_string(),
+            })
+            .await
+            .unwrap();
 
         let _ = shutdown.send(());
     }
