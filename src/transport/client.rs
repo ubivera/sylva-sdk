@@ -129,6 +129,61 @@ impl AccountSession {
         self.client.revoke_device(request).await?;
         Ok(())
     }
+
+    /// The caller's profile (public identity fields only).
+    pub async fn get_profile(&mut self) -> Result<pb::Profile> {
+        Ok(self.client.get_profile(self.authed(pb::Empty {})).await?.into_inner())
+    }
+
+    /// Change the caller's display name; returns the updated profile.
+    pub async fn update_display_name(&mut self, display_name: impl Into<String>) -> Result<pb::Profile> {
+        let request = self.authed(pb::UpdateDisplayNameRequest {
+            display_name: display_name.into(),
+        });
+        Ok(self.client.update_display_name(request).await?.into_inner())
+    }
+
+    /// Change the caller's email (re-auth: current password); returns the
+    /// updated profile.
+    pub async fn update_email(
+        &mut self,
+        new_email: impl Into<String>,
+        current_password: impl Into<String>,
+    ) -> Result<pb::Profile> {
+        let request = self.authed(pb::UpdateEmailRequest {
+            new_email: new_email.into(),
+            current_password: current_password.into(),
+        });
+        Ok(self.client.update_email(request).await?.into_inner())
+    }
+
+    /// Change the caller's password: the server recomputes its verifier from
+    /// `new_password` and stores the client's 2SKD re-wrap of the master key.
+    pub async fn change_password(&mut self, request: pb::ChangePasswordRequest) -> Result<()> {
+        self.client.change_password(self.authed(request)).await?;
+        Ok(())
+    }
+
+    /// The caller's sealed avatar blob, or `None` if unset (the server signals
+    /// "unset" with empty bytes). The blob is opaque here — the facade decrypts it.
+    pub async fn get_avatar(&mut self) -> Result<Option<Vec<u8>>> {
+        let avatar = self
+            .client
+            .get_avatar(self.authed(pb::Empty {}))
+            .await?
+            .into_inner()
+            .avatar;
+        Ok(if avatar.is_empty() { None } else { Some(avatar) })
+    }
+
+    /// Store the caller's sealed avatar blob (overwrites any prior). The blob is
+    /// already client-sealed; the server only enforces a byte cap.
+    pub async fn set_avatar(&mut self, avatar: Vec<u8>) -> Result<()> {
+        self.client
+            .set_avatar(self.authed(pb::SetAvatarRequest { avatar }))
+            .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -261,6 +316,71 @@ mod tests {
             require_token(&req)?;
             Ok(Response::new(pb::Empty {}))
         }
+
+        async fn get_profile(
+            &self,
+            req: Request<pb::Empty>,
+        ) -> std::result::Result<Response<pb::Profile>, Status> {
+            require_token(&req)?;
+            Ok(Response::new(pb::Profile {
+                user_id: "11111111-1111-1111-1111-111111111111".to_string(),
+                email: "olivia@test.local".to_string(),
+                display_name: "Olivia".to_string(),
+                instance_role: "owner".to_string(),
+            }))
+        }
+
+        async fn update_display_name(
+            &self,
+            req: Request<pb::UpdateDisplayNameRequest>,
+        ) -> std::result::Result<Response<pb::Profile>, Status> {
+            require_token(&req)?;
+            Ok(Response::new(pb::Profile {
+                user_id: "11111111-1111-1111-1111-111111111111".to_string(),
+                email: "olivia@test.local".to_string(),
+                display_name: req.into_inner().display_name,
+                instance_role: "owner".to_string(),
+            }))
+        }
+
+        async fn update_email(
+            &self,
+            req: Request<pb::UpdateEmailRequest>,
+        ) -> std::result::Result<Response<pb::Profile>, Status> {
+            require_token(&req)?;
+            Ok(Response::new(pb::Profile {
+                user_id: "11111111-1111-1111-1111-111111111111".to_string(),
+                email: req.into_inner().new_email,
+                display_name: "Olivia".to_string(),
+                instance_role: "owner".to_string(),
+            }))
+        }
+
+        async fn change_password(
+            &self,
+            req: Request<pb::ChangePasswordRequest>,
+        ) -> std::result::Result<Response<pb::Empty>, Status> {
+            require_token(&req)?;
+            Ok(Response::new(pb::Empty {}))
+        }
+
+        async fn get_avatar(
+            &self,
+            req: Request<pb::Empty>,
+        ) -> std::result::Result<Response<pb::GetAvatarResponse>, Status> {
+            require_token(&req)?;
+            Ok(Response::new(pb::GetAvatarResponse {
+                avatar: vec![42u8; 8],
+            }))
+        }
+
+        async fn set_avatar(
+            &self,
+            req: Request<pb::SetAvatarRequest>,
+        ) -> std::result::Result<Response<pb::Empty>, Status> {
+            require_token(&req)?;
+            Ok(Response::new(pb::Empty {}))
+        }
     }
 
     /// Spin up the mock on an ephemeral port; returns its `host:port` + a
@@ -319,6 +439,32 @@ mod tests {
         assert_eq!(enrolled.device_label, "Laptop");
 
         account.revoke_device("dev-1").await.unwrap();
+
+        // Account self-service round-trips: read the profile, update name + email,
+        // and change the password (all authed; the mock asserts the bearer token).
+        let profile = account.get_profile().await.unwrap();
+        assert_eq!(profile.display_name, "Olivia");
+        assert_eq!(profile.instance_role, "owner");
+        let renamed = account.update_display_name("Liv").await.unwrap();
+        assert_eq!(renamed.display_name, "Liv");
+        let remailed = account.update_email("liv@x", "pw").await.unwrap();
+        assert_eq!(remailed.email, "liv@x");
+        account
+            .change_password(pb::ChangePasswordRequest {
+                current_password: "pw".to_string(),
+                new_password: "pw2".to_string(),
+                new_master_key_wrapped: vec![9u8; 72],
+                new_kdf_salt: vec![8u8; 16],
+                new_kdf_params: r#"{"m":65536,"t":3,"p":4}"#.to_string(),
+            })
+            .await
+            .unwrap();
+
+        // Avatar: set the opaque blob, then read it back (the mock returns a
+        // non-empty blob → Some).
+        account.set_avatar(vec![1u8; 16]).await.unwrap();
+        let avatar = account.get_avatar().await.unwrap();
+        assert_eq!(avatar, Some(vec![42u8; 8]));
 
         let _ = shutdown.send(());
     }

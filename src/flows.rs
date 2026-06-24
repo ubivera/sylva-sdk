@@ -272,6 +272,42 @@ mod tests {
         ) -> std::result::Result<Response<pb::Empty>, Status> {
             Err(Status::unimplemented("mock"))
         }
+        async fn get_profile(
+            &self,
+            _req: Request<pb::Empty>,
+        ) -> std::result::Result<Response<pb::Profile>, Status> {
+            Err(Status::unimplemented("mock"))
+        }
+        async fn update_display_name(
+            &self,
+            _req: Request<pb::UpdateDisplayNameRequest>,
+        ) -> std::result::Result<Response<pb::Profile>, Status> {
+            Err(Status::unimplemented("mock"))
+        }
+        async fn update_email(
+            &self,
+            _req: Request<pb::UpdateEmailRequest>,
+        ) -> std::result::Result<Response<pb::Profile>, Status> {
+            Err(Status::unimplemented("mock"))
+        }
+        async fn change_password(
+            &self,
+            _req: Request<pb::ChangePasswordRequest>,
+        ) -> std::result::Result<Response<pb::Empty>, Status> {
+            Err(Status::unimplemented("mock"))
+        }
+        async fn get_avatar(
+            &self,
+            _req: Request<pb::Empty>,
+        ) -> std::result::Result<Response<pb::GetAvatarResponse>, Status> {
+            Err(Status::unimplemented("mock"))
+        }
+        async fn set_avatar(
+            &self,
+            _req: Request<pb::SetAvatarRequest>,
+        ) -> std::result::Result<Response<pb::Empty>, Status> {
+            Err(Status::unimplemented("mock"))
+        }
     }
 
     async fn spawn(mock: FlowMock) -> (Channel, tokio::sync::oneshot::Sender<()>) {

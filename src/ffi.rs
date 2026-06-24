@@ -15,7 +15,7 @@ use std::sync::Arc;
 use tokio::runtime::Runtime;
 
 use crate::client::{
-    Client, ClientError, ConnectInfo, DeviceInfo, Enrollment, SignInOutcome,
+    Client, ClientError, ConnectInfo, DeviceInfo, Enrollment, Profile, SignInOutcome,
 };
 
 /// The shell-facing handle: a blocking wrapper over the async [`Client`] facade
@@ -91,6 +91,50 @@ impl SylvaClient {
     pub fn revoke_device(&self, device_id: String) -> Result<(), ClientError> {
         self.runtime
             .block_on(self.client.revoke_device(&device_id))
+    }
+
+    /// This account's profile (for the account-settings screen).
+    pub fn get_profile(&self) -> Result<Profile, ClientError> {
+        self.runtime.block_on(self.client.get_profile())
+    }
+
+    /// Change this account's display name; returns the updated profile.
+    pub fn update_display_name(&self, display_name: String) -> Result<Profile, ClientError> {
+        self.runtime
+            .block_on(self.client.update_display_name(&display_name))
+    }
+
+    /// Change this account's email (re-auth: current password); returns the
+    /// updated profile.
+    pub fn update_email(
+        &self,
+        new_email: String,
+        current_password: String,
+    ) -> Result<Profile, ClientError> {
+        self.runtime
+            .block_on(self.client.update_email(&new_email, &current_password))
+    }
+
+    /// Change this account's password (local re-wrap + server verifier update).
+    pub fn change_password(
+        &self,
+        current_password: String,
+        new_password: String,
+    ) -> Result<(), ClientError> {
+        self.runtime
+            .block_on(self.client.change_password(&current_password, &new_password))
+    }
+
+    /// This account's avatar (decrypted), or `None` if unset. Needs the cached
+    /// master key. `Option<Vec<u8>>` maps to a nullable C# `byte[]`.
+    pub fn get_avatar(&self) -> Result<Option<Vec<u8>>, ClientError> {
+        self.runtime.block_on(self.client.get_avatar())
+    }
+
+    /// Seal a PNG under the master key and store it server-side (overwrites any
+    /// prior). `Vec<u8>` maps to a C# `byte[]`.
+    pub fn set_avatar(&self, avatar: Vec<u8>) -> Result<(), ClientError> {
+        self.runtime.block_on(self.client.set_avatar(avatar))
     }
 
     /// Sign out of the active session, keeping this device enrolled (see

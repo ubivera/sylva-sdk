@@ -9,8 +9,6 @@ syntax = "proto3";
 // server stores/relays ciphertext and reads only auth keys, liveness, and
 // envelope metadata (which machine, blob kind, recipient, sequence). See
 // docs/design/agent.md.
-//
-// Vendored from sylva-server (cargo run --bin sync-proto); do not edit here.
 package sylva.machine.v1;
 
 message Empty {}
@@ -60,6 +58,8 @@ message ReportTelemetryRequest {
 // keep-alive. Spine: keep-alive + config only.
 message MachineConfig {
   bool location_enabled = 1;
+  bytes device_admin_group_public = 2;  // X25519 group key to seal telemetry to (empty = none provisioned yet)
+  bytes group_key_id = 3;               // identifies that group key; stamped as TelemetryBlob.recipient_key_id
 }
 
 message ServerPush {

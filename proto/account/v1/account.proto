@@ -109,6 +109,46 @@ message DeviceId {
   string device_id = 1;
 }
 
+// ── Account self-service ──────────────────────────────────────────────────────
+// All authenticated (session token) and operate on the calling user.
+
+// The calling user's profile (no secrets — public identity fields only).
+message Profile {
+  string user_id = 1;
+  string email = 2;
+  string display_name = 3;
+  string instance_role = 4;             // owner|admin|member
+}
+
+message UpdateDisplayNameRequest {
+  string display_name = 1;
+}
+
+// Re-auth: changing the email requires the current password.
+message UpdateEmailRequest {
+  string new_email = 1;
+  string current_password = 2;
+}
+
+// Changing the password recomputes the server's Argon2id verifier *and* re-wraps
+// the master key client-side (2SKD): the client hands back a fresh wrap under
+// KDF(new_password, secret_key). The private keys (wrapped under the unchanged
+// master key) don't change, so only the master-key wrap + salt/params rotate.
+message ChangePasswordRequest {
+  string current_password = 1;
+  string new_password = 2;              // server recomputes its Argon2id verifier
+  bytes  new_master_key_wrapped = 3;    // client 2SKD re-wrap
+  bytes  new_kdf_salt = 4;
+  string new_kdf_params = 5;
+}
+
+// ── Avatar (E2E) ──────────────────────────────────────────────────────────────
+// The account avatar, sealed CLIENT-SIDE under the user's master key (symmetric
+// E2E). The server stores the opaque blob (one per user, overwrite) and serves
+// it back — it never sees plaintext, only enforcing a byte cap.
+message GetAvatarResponse { bytes avatar = 1; }  // empty bytes = no avatar set
+message SetAvatarRequest  { bytes avatar = 1; }  // client-sealed blob
+
 // The Hub's identity/enrollment service — core infrastructure, distinct from
 // Platform/Resources. `Bootstrap` + `Login` are unauthenticated (peer-IP
 // rate-limited server-side); the rest require the session token in
@@ -121,4 +161,15 @@ service Account {
   rpc RegisterDevice(RegisterDeviceRequest) returns (Device);
   rpc ListMyDevices(Empty) returns (ListMyDevicesResponse);
   rpc RevokeDevice(DeviceId) returns (Empty);
+
+  // Account self-service (authenticated; operate on the calling user).
+  rpc GetProfile(Empty) returns (Profile);
+  rpc UpdateDisplayName(UpdateDisplayNameRequest) returns (Profile);
+  rpc UpdateEmail(UpdateEmailRequest) returns (Profile);
+  rpc ChangePassword(ChangePasswordRequest) returns (Empty);
+
+  // The account avatar: client-sealed under the master key (the server stores
+  // only the opaque blob, one per user, overwrite).
+  rpc GetAvatar(Empty) returns (GetAvatarResponse);
+  rpc SetAvatar(SetAvatarRequest) returns (Empty);
 }
