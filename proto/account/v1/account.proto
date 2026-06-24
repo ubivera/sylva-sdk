@@ -142,6 +142,13 @@ message ChangePasswordRequest {
   string new_kdf_params = 5;
 }
 
+// ── Avatar (E2E) ──────────────────────────────────────────────────────────────
+// The account avatar, sealed CLIENT-SIDE under the user's master key (symmetric
+// E2E). The server stores the opaque blob (one per user, overwrite) and serves
+// it back — it never sees plaintext, only enforcing a byte cap.
+message GetAvatarResponse { bytes avatar = 1; }  // empty bytes = no avatar set
+message SetAvatarRequest  { bytes avatar = 1; }  // client-sealed blob
+
 // The Hub's identity/enrollment service — core infrastructure, distinct from
 // Platform/Resources. `Bootstrap` + `Login` are unauthenticated (peer-IP
 // rate-limited server-side); the rest require the session token in
@@ -160,4 +167,9 @@ service Account {
   rpc UpdateDisplayName(UpdateDisplayNameRequest) returns (Profile);
   rpc UpdateEmail(UpdateEmailRequest) returns (Profile);
   rpc ChangePassword(ChangePasswordRequest) returns (Empty);
+
+  // The account avatar: client-sealed under the master key (the server stores
+  // only the opaque blob, one per user, overwrite).
+  rpc GetAvatar(Empty) returns (GetAvatarResponse);
+  rpc SetAvatar(SetAvatarRequest) returns (Empty);
 }

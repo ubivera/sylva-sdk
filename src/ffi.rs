@@ -125,6 +125,18 @@ impl SylvaClient {
             .block_on(self.client.change_password(&current_password, &new_password))
     }
 
+    /// This account's avatar (decrypted), or `None` if unset. Needs the cached
+    /// master key. `Option<Vec<u8>>` maps to a nullable C# `byte[]`.
+    pub fn get_avatar(&self) -> Result<Option<Vec<u8>>, ClientError> {
+        self.runtime.block_on(self.client.get_avatar())
+    }
+
+    /// Seal a PNG under the master key and store it server-side (overwrites any
+    /// prior). `Vec<u8>` maps to a C# `byte[]`.
+    pub fn set_avatar(&self, avatar: Vec<u8>) -> Result<(), ClientError> {
+        self.runtime.block_on(self.client.set_avatar(avatar))
+    }
+
     /// Sign out of the active session, keeping this device enrolled (see
     /// [`Client::sign_out`]). A return needs only the password.
     pub fn sign_out(&self) -> Result<(), ClientError> {

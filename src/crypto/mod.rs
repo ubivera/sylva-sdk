@@ -362,6 +362,18 @@ pub fn rewrap_master_key(
     })
 }
 
+/// Seal arbitrary user data (e.g. the account avatar) under the user's master
+/// key — symmetric E2E for data only the user reads, decryptable on any of their
+/// enrolled devices (each caches the master key). The server stores only this blob.
+pub fn seal_with_master(master_key: &MasterKey, plaintext: &[u8]) -> Result<Vec<u8>> {
+    seal(master_key.as_bytes(), plaintext)
+}
+
+/// Open a [`seal_with_master`] blob with the user's master key.
+pub fn open_with_master(master_key: &MasterKey, blob: &[u8]) -> Result<Vec<u8>> {
+    open(master_key.as_bytes(), blob)
+}
+
 /// The 2SKD KEK: `Argon2id(password, salt) XOR HKDF-SHA256(secret_key, salt)`.
 fn derive_kek(
     password: &[u8],
@@ -650,5 +662,17 @@ mod tests {
         let a = seal_to(&kp.public, b"same plaintext").unwrap();
         let b = seal_to(&kp.public, b"same plaintext").unwrap();
         assert_ne!(a, b, "fresh ephemeral key + nonce per message");
+    }
+
+    #[test]
+    fn master_seal_round_trips_and_a_different_key_fails() {
+        let master = MasterKey::from_bytes([7u8; KEY_LEN]);
+        let payload = b"avatar PNG bytes";
+        let blob = seal_with_master(&master, payload).unwrap();
+        assert_eq!(open_with_master(&master, &blob).unwrap(), payload);
+
+        // A different master key can't open it.
+        let other = MasterKey::from_bytes([8u8; KEY_LEN]);
+        assert!(open_with_master(&other, &blob).is_err());
     }
 }

@@ -9,8 +9,6 @@ syntax = "proto3";
 // server stores/relays ciphertext and reads only auth keys, liveness, and
 // envelope metadata (which machine, blob kind, recipient, sequence). See
 // docs/design/agent.md.
-//
-// Vendored from sylva-server (cargo run --bin sync-proto); do not edit here.
 package sylva.machine.v1;
 
 message Empty {}

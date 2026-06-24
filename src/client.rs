@@ -383,6 +383,40 @@ impl Client {
         Ok(())
     }
 
+    /// This account's avatar (decrypted), or None if unset. Needs the cached
+    /// master key (any enrolled, signed-in device has it).
+    pub async fn get_avatar(&self) -> Result<Option<Vec<u8>>> {
+        let master = self
+            .vault
+            .master_key()
+            .map_err(|_| ClientError::Storage)?
+            .ok_or(ClientError::NotSignedIn)?;
+        let mut inner = self.inner.lock().await;
+        let session = inner.session.as_mut().ok_or(ClientError::NotSignedIn)?;
+        let blob = session.get_avatar().await.map_err(|_| ClientError::Server)?;
+        match blob {
+            Some(b) => Ok(Some(
+                crypto::open_with_master(&master, &b).map_err(|_| ClientError::Crypto)?,
+            )),
+            None => Ok(None),
+        }
+    }
+
+    /// Seal a PNG under the master key and store it server-side (overwrites any
+    /// prior). The server only ever sees the sealed blob.
+    pub async fn set_avatar(&self, png: Vec<u8>) -> Result<()> {
+        let master = self
+            .vault
+            .master_key()
+            .map_err(|_| ClientError::Storage)?
+            .ok_or(ClientError::NotSignedIn)?;
+        let sealed = crypto::seal_with_master(&master, &png).map_err(|_| ClientError::Crypto)?;
+        let mut inner = self.inner.lock().await;
+        let session = inner.session.as_mut().ok_or(ClientError::NotSignedIn)?;
+        session.set_avatar(sealed).await.map_err(|_| ClientError::Server)?;
+        Ok(())
+    }
+
     /// Sign out of the active session but keep this device enrolled: drops the
     /// in-memory state, the cached session token, and the unwrapped master key, so
     /// a return needs only the password (the Secret Key, device key, and pinned
@@ -586,9 +620,10 @@ mod tests {
     }
 
     /// Mock Account server serving a real wrapped bundle (so unlock succeeds) +
-    /// canned devices.
+    /// canned devices. The avatar blob is stored so set→get round-trips.
     struct Mock {
         key_material: pb::KeyMaterial,
+        avatar: std::sync::Mutex<Option<Vec<u8>>>,
     }
 
     #[tonic::async_trait]
@@ -718,6 +753,22 @@ mod tests {
             }
             Ok(Response::new(pb::Empty {}))
         }
+        async fn get_avatar(
+            &self,
+            req: Request<pb::Empty>,
+        ) -> std::result::Result<Response<pb::GetAvatarResponse>, Status> {
+            require_token(&req)?;
+            let avatar = self.avatar.lock().unwrap().clone().unwrap_or_default();
+            Ok(Response::new(pb::GetAvatarResponse { avatar }))
+        }
+        async fn set_avatar(
+            &self,
+            req: Request<pb::SetAvatarRequest>,
+        ) -> std::result::Result<Response<pb::Empty>, Status> {
+            require_token(&req)?;
+            *self.avatar.lock().unwrap() = Some(req.into_inner().avatar);
+            Ok(Response::new(pb::Empty {}))
+        }
     }
 
     async fn spawn(key_material: pb::KeyMaterial) -> (String, tokio::sync::oneshot::Sender<()>) {
@@ -726,7 +777,10 @@ mod tests {
         let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             tonic::transport::Server::builder()
-                .add_service(AccountServer::new(Mock { key_material }))
+                .add_service(AccountServer::new(Mock {
+                    key_material,
+                    avatar: std::sync::Mutex::new(None),
+                }))
                 .serve_with_incoming_shutdown(
                     tokio_stream::wrappers::TcpListenerStream::new(listener),
                     async {
@@ -825,6 +879,32 @@ mod tests {
         // The cached Secret Key now lets a returning sign-in omit it.
         assert!(client.vault.secret_key().unwrap().is_some());
         assert_eq!(client.vault.session_token().unwrap().as_deref(), Some(TOKEN));
+
+        let _ = shutdown.send(());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn avatar_seals_round_trips_and_decrypts() {
+        // Sign in first so the vault holds the master key, then the avatar is
+        // sealed under it client-side, stored in the mock, fetched, and decrypted.
+        let boot = crypto::bootstrap_identity_with_params("pw", fast()).unwrap();
+        let secret_key_str = boot.secret_key.display();
+        let (addr, shutdown) = spawn(key_material(&boot.bundle)).await;
+        let client = Client::with_store(Box::new(MemoryStore::new()));
+        inject(&client, &addr).await;
+        client
+            .sign_in("o@x", "pw", Some(&secret_key_str))
+            .await
+            .unwrap();
+
+        // No avatar yet.
+        assert!(client.get_avatar().await.unwrap().is_none());
+
+        // Set an avatar, then read it back: the decrypted bytes equal the original.
+        let png = b"\x89PNG\r\n\x1a\n fake avatar bytes".to_vec();
+        client.set_avatar(png.clone()).await.unwrap();
+        let got = client.get_avatar().await.unwrap();
+        assert_eq!(got.as_deref(), Some(png.as_slice()));
 
         let _ = shutdown.send(());
     }

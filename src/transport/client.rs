@@ -163,6 +163,27 @@ impl AccountSession {
         self.client.change_password(self.authed(request)).await?;
         Ok(())
     }
+
+    /// The caller's sealed avatar blob, or `None` if unset (the server signals
+    /// "unset" with empty bytes). The blob is opaque here — the facade decrypts it.
+    pub async fn get_avatar(&mut self) -> Result<Option<Vec<u8>>> {
+        let avatar = self
+            .client
+            .get_avatar(self.authed(pb::Empty {}))
+            .await?
+            .into_inner()
+            .avatar;
+        Ok(if avatar.is_empty() { None } else { Some(avatar) })
+    }
+
+    /// Store the caller's sealed avatar blob (overwrites any prior). The blob is
+    /// already client-sealed; the server only enforces a byte cap.
+    pub async fn set_avatar(&mut self, avatar: Vec<u8>) -> Result<()> {
+        self.client
+            .set_avatar(self.authed(pb::SetAvatarRequest { avatar }))
+            .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -342,6 +363,24 @@ mod tests {
             require_token(&req)?;
             Ok(Response::new(pb::Empty {}))
         }
+
+        async fn get_avatar(
+            &self,
+            req: Request<pb::Empty>,
+        ) -> std::result::Result<Response<pb::GetAvatarResponse>, Status> {
+            require_token(&req)?;
+            Ok(Response::new(pb::GetAvatarResponse {
+                avatar: vec![42u8; 8],
+            }))
+        }
+
+        async fn set_avatar(
+            &self,
+            req: Request<pb::SetAvatarRequest>,
+        ) -> std::result::Result<Response<pb::Empty>, Status> {
+            require_token(&req)?;
+            Ok(Response::new(pb::Empty {}))
+        }
     }
 
     /// Spin up the mock on an ephemeral port; returns its `host:port` + a
@@ -420,6 +459,12 @@ mod tests {
             })
             .await
             .unwrap();
+
+        // Avatar: set the opaque blob, then read it back (the mock returns a
+        // non-empty blob → Some).
+        account.set_avatar(vec![1u8; 16]).await.unwrap();
+        let avatar = account.get_avatar().await.unwrap();
+        assert_eq!(avatar, Some(vec![42u8; 8]));
 
         let _ = shutdown.send(());
     }

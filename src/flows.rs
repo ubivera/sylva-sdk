@@ -296,6 +296,18 @@ mod tests {
         ) -> std::result::Result<Response<pb::Empty>, Status> {
             Err(Status::unimplemented("mock"))
         }
+        async fn get_avatar(
+            &self,
+            _req: Request<pb::Empty>,
+        ) -> std::result::Result<Response<pb::GetAvatarResponse>, Status> {
+            Err(Status::unimplemented("mock"))
+        }
+        async fn set_avatar(
+            &self,
+            _req: Request<pb::SetAvatarRequest>,
+        ) -> std::result::Result<Response<pb::Empty>, Status> {
+            Err(Status::unimplemented("mock"))
+        }
     }
 
     async fn spawn(mock: FlowMock) -> (Channel, tokio::sync::oneshot::Sender<()>) {
