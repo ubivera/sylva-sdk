@@ -75,11 +75,38 @@ message LoginResponse {
   }
 }
 
-// Declared for the contract; unimplemented in slice 1 (the bootstrap owner has
-// no second factor yet).
+// The second leg of MFA login: the challenge token from `MfaRequired` plus the
+// user's TOTP code (in `mfa_response`). On success the server issues a session.
 message VerifyMfaRequest {
   string mfa_challenge_token = 1;
   bytes mfa_response = 2;
+}
+
+// ── TOTP authenticator management (authenticated) ─────────────────────────────
+// Enroll → confirm a TOTP authenticator, list the verified ones, and remove
+// them. Secrets are server-side encrypted at rest; only the base32 form + the
+// otpauth URI (for the QR code) are ever returned, and only at enrollment.
+message EnrollTotpResponse {
+  string totp_id = 1;
+  string secret_base32 = 2;
+  string otpauth_uri = 3;
+}
+message ConfirmTotpRequest {
+  string totp_id = 1;
+  string code = 2;
+  string label = 3;
+}
+message TotpFactor {
+  string totp_id = 1;
+  string label = 2;
+  string created_at = 3;
+  string last_used_at = 4;  // empty if never used
+}
+message ListTotpResponse {
+  repeated TotpFactor factors = 1;
+}
+message RemoveTotpRequest {
+  string totp_id = 1;
 }
 
 message GetKeyMaterialResponse {
@@ -172,4 +199,10 @@ service Account {
   // only the opaque blob, one per user, overwrite).
   rpc GetAvatar(Empty) returns (GetAvatarResponse);
   rpc SetAvatar(SetAvatarRequest) returns (Empty);
+
+  // TOTP authenticator management (authenticated; operate on the calling user).
+  rpc EnrollTotp(Empty) returns (EnrollTotpResponse);
+  rpc ConfirmTotp(ConfirmTotpRequest) returns (Empty);
+  rpc ListTotp(Empty) returns (ListTotpResponse);
+  rpc RemoveTotp(RemoveTotpRequest) returns (Empty);
 }

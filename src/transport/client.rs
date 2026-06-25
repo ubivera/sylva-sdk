@@ -71,6 +71,13 @@ pub async fn login(channel: Channel, request: pb::LoginRequest) -> Result<pb::Lo
     Ok(client.login(tonic::Request::new(request)).await?.into_inner())
 }
 
+/// Unauthenticated: complete the second (MFA) leg of login by exchanging the
+/// challenge token + a TOTP code for a session. Mirrors [`login`].
+pub async fn verify_mfa(channel: Channel, request: pb::VerifyMfaRequest) -> Result<pb::Session> {
+    let mut client = AccountClient::new(channel);
+    Ok(client.verify_mfa(tonic::Request::new(request)).await?.into_inner())
+}
+
 /// An authenticated `Account` client: a connected channel plus the session
 /// token, which it attaches as `authorization: Bearer <token>` on every call.
 pub struct AccountSession {
@@ -184,6 +191,44 @@ impl AccountSession {
             .await?;
         Ok(())
     }
+
+    /// Begin enrolling a TOTP authenticator: the server returns the new id, the
+    /// base32 secret, and the `otpauth://` URI (for the QR code). Not active
+    /// until [`confirm_totp`](Self::confirm_totp).
+    pub async fn enroll_totp(&mut self) -> Result<pb::EnrollTotpResponse> {
+        Ok(self.client.enroll_totp(self.authed(pb::Empty {})).await?.into_inner())
+    }
+
+    /// Confirm a pending TOTP enrollment by proving a current code; `label`
+    /// names the authenticator in the security list.
+    pub async fn confirm_totp(
+        &mut self,
+        totp_id: impl Into<String>,
+        code: impl Into<String>,
+        label: impl Into<String>,
+    ) -> Result<()> {
+        let request = self.authed(pb::ConfirmTotpRequest {
+            totp_id: totp_id.into(),
+            code: code.into(),
+            label: label.into(),
+        });
+        self.client.confirm_totp(request).await?;
+        Ok(())
+    }
+
+    /// The caller's verified TOTP authenticators (for the security list).
+    pub async fn list_totp(&mut self) -> Result<Vec<pb::TotpFactor>> {
+        Ok(self.client.list_totp(self.authed(pb::Empty {})).await?.into_inner().factors)
+    }
+
+    /// Remove one of the caller's TOTP authenticators.
+    pub async fn remove_totp(&mut self, totp_id: impl Into<String>) -> Result<()> {
+        let request = self.authed(pb::RemoveTotpRequest {
+            totp_id: totp_id.into(),
+        });
+        self.client.remove_totp(request).await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -253,7 +298,11 @@ mod tests {
             &self,
             _req: Request<pb::VerifyMfaRequest>,
         ) -> std::result::Result<Response<pb::Session>, Status> {
-            Err(Status::unimplemented("mock"))
+            Ok(Response::new(pb::Session {
+                token: TOKEN.to_string(),
+                user_id: "11111111-1111-1111-1111-111111111111".to_string(),
+                expires_at: "2030-01-01T00:00:00Z".to_string(),
+            }))
         }
 
         async fn get_key_material(
@@ -381,6 +430,49 @@ mod tests {
             require_token(&req)?;
             Ok(Response::new(pb::Empty {}))
         }
+
+        async fn enroll_totp(
+            &self,
+            req: Request<pb::Empty>,
+        ) -> std::result::Result<Response<pb::EnrollTotpResponse>, Status> {
+            require_token(&req)?;
+            Ok(Response::new(pb::EnrollTotpResponse {
+                totp_id: "totp-1".to_string(),
+                secret_base32: "JBSWY3DPEHPK3PXP".to_string(),
+                otpauth_uri: "otpauth://totp/Sylva:o@x?secret=JBSWY3DPEHPK3PXP".to_string(),
+            }))
+        }
+
+        async fn confirm_totp(
+            &self,
+            req: Request<pb::ConfirmTotpRequest>,
+        ) -> std::result::Result<Response<pb::Empty>, Status> {
+            require_token(&req)?;
+            Ok(Response::new(pb::Empty {}))
+        }
+
+        async fn list_totp(
+            &self,
+            req: Request<pb::Empty>,
+        ) -> std::result::Result<Response<pb::ListTotpResponse>, Status> {
+            require_token(&req)?;
+            Ok(Response::new(pb::ListTotpResponse {
+                factors: vec![pb::TotpFactor {
+                    totp_id: "totp-1".to_string(),
+                    label: "My phone".to_string(),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    last_used_at: String::new(),
+                }],
+            }))
+        }
+
+        async fn remove_totp(
+            &self,
+            req: Request<pb::RemoveTotpRequest>,
+        ) -> std::result::Result<Response<pb::Empty>, Status> {
+            require_token(&req)?;
+            Ok(Response::new(pb::Empty {}))
+        }
     }
 
     /// Spin up the mock on an ephemeral port; returns its `host:port` + a
@@ -465,6 +557,17 @@ mod tests {
         account.set_avatar(vec![1u8; 16]).await.unwrap();
         let avatar = account.get_avatar().await.unwrap();
         assert_eq!(avatar, Some(vec![42u8; 8]));
+
+        // TOTP: enroll → confirm → list → remove (all authed; the mock asserts
+        // the bearer token and returns canned values).
+        let enroll = account.enroll_totp().await.unwrap();
+        assert_eq!(enroll.totp_id, "totp-1");
+        assert_eq!(enroll.secret_base32, "JBSWY3DPEHPK3PXP");
+        account.confirm_totp("totp-1", "123456", "My phone").await.unwrap();
+        let factors = account.list_totp().await.unwrap();
+        assert_eq!(factors.len(), 1);
+        assert_eq!(factors[0].label, "My phone");
+        account.remove_totp("totp-1").await.unwrap();
 
         let _ = shutdown.send(());
     }

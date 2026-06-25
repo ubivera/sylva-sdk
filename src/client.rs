@@ -33,6 +33,8 @@ pub enum ClientError {
     Crypto,
     #[error("a Secret Key is required to sign in on this device")]
     SecretKeyRequired,
+    #[error("incorrect code")]
+    InvalidCode,
     #[error("secure storage error")]
     Storage,
     #[error("server error")]
@@ -92,6 +94,27 @@ pub struct Profile {
     pub instance_role: String,
 }
 
+/// A freshly started TOTP enrollment: show `otpauth_uri` as a QR code (or
+/// `secret_base32` for manual entry), then confirm a code to activate it.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct TotpEnrollment {
+    pub totp_id: String,
+    pub secret_base32: String,
+    pub otpauth_uri: String,
+}
+
+/// A verified TOTP authenticator row for the security screen.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct TotpFactor {
+    pub totp_id: String,
+    pub label: String,
+    pub created_at: String,
+    /// RFC 3339, or empty if the authenticator has never completed a sign-in.
+    pub last_used_at: String,
+}
+
 /// The outcome of a sign-in attempt.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
@@ -100,6 +123,20 @@ pub enum SignInOutcome {
     /// The account has a second factor; the shell must complete MFA (not yet
     /// supported by this client — slice 1).
     MfaRequired,
+}
+
+/// Everything needed to complete the second (MFA) leg, stashed between the
+/// password leg returning `MfaRequired` and the [`Client::submit_mfa`] call. The
+/// password is held (zeroized on drop) because unlocking the key bundle after
+/// `VerifyMfa` still needs it.
+struct PendingMfa {
+    channel: Channel,
+    identity_public: [u8; 32],
+    #[allow(dead_code)]
+    email: String,
+    password: zeroize::Zeroizing<String>,
+    secret_key: SecretKey,
+    challenge_token: String,
 }
 
 /// In-memory connection + session state. All `Option` so `Default` is derivable
@@ -112,6 +149,8 @@ struct Inner {
     session: Option<AccountSession>,
     identity: Option<UnlockedIdentity>,
     secret_key: Option<SecretKey>,
+    /// Set between the password leg (returned `MfaRequired`) and `submit_mfa`.
+    pending_mfa: Option<PendingMfa>,
 }
 
 /// The stateful client handle the shell holds for the lifetime of the app.
@@ -246,8 +285,8 @@ impl Client {
             .ok_or(ClientError::NotConnected)?
             .identity_public;
 
-        match flows::login(channel, email, password, &resolved).await {
-            Ok(logged_in) => {
+        match flows::login(channel.clone(), email, password, &resolved).await {
+            Ok(flows::LoginOutcome::Authenticated(logged_in)) => {
                 self.persist(ToCache {
                     identity_public,
                     user_id: &logged_in.user_id,
@@ -265,7 +304,68 @@ impl Client {
                 inner.secret_key = Some(resolved);
                 Ok(outcome)
             }
-            Err(flows::EnrollError::MfaRequired) => Ok(SignInOutcome::MfaRequired),
+            // Stash everything the second leg needs; the shell then calls
+            // `submit_mfa` with the user's code.
+            Ok(flows::LoginOutcome::MfaRequired { challenge_token, .. }) => {
+                inner.pending_mfa = Some(PendingMfa {
+                    channel,
+                    identity_public,
+                    email: email.to_string(),
+                    password: zeroize::Zeroizing::new(password.to_string()),
+                    secret_key: resolved,
+                    challenge_token,
+                });
+                Ok(SignInOutcome::MfaRequired)
+            }
+            Err(flows::EnrollError::Crypto(_)) => Err(ClientError::Crypto),
+            Err(other) => Err(map_enroll_err(other)),
+        }
+    }
+
+    /// Complete a sign-in that returned [`SignInOutcome::MfaRequired`]: submit the
+    /// user's TOTP `code` against the stashed challenge. On success the session is
+    /// persisted exactly as a non-MFA sign-in. A wrong code returns
+    /// [`ClientError::InvalidCode`] and *keeps* the pending state so the user can
+    /// retry; any other failure clears it.
+    pub async fn submit_mfa(&self, code: &str) -> Result<SignInOutcome> {
+        let mut inner = self.inner.lock().await;
+        let pending = inner.pending_mfa.take().ok_or(ClientError::NotSignedIn)?;
+
+        match flows::complete_mfa(
+            pending.channel.clone(),
+            &pending.challenge_token,
+            code,
+            &pending.password,
+            &pending.secret_key,
+        )
+        .await
+        {
+            Ok(logged_in) => {
+                self.persist(ToCache {
+                    identity_public: pending.identity_public,
+                    user_id: &logged_in.user_id,
+                    token: logged_in.account.token(),
+                    master_key: &logged_in.identity.master_key,
+                    secret_key: &pending.secret_key,
+                    device_secret: None,
+                    endpoints: inner.endpoints.clone(),
+                })?;
+                let outcome = SignInOutcome::Success {
+                    user_id: logged_in.user_id.clone(),
+                };
+                inner.session = Some(logged_in.account);
+                inner.identity = Some(logged_in.identity);
+                inner.secret_key = Some(pending.secret_key);
+                Ok(outcome)
+            }
+            // Wrong code (or expired challenge): the server answers
+            // `unauthenticated`. Re-stash so the user can try again.
+            Err(flows::EnrollError::Transport(transport::ClientError::Rpc(status)))
+                if status.code() == tonic::Code::Unauthenticated =>
+            {
+                inner.pending_mfa = Some(pending);
+                Err(ClientError::InvalidCode)
+            }
             Err(flows::EnrollError::Crypto(_)) => Err(ClientError::Crypto),
             Err(other) => Err(map_enroll_err(other)),
         }
@@ -380,6 +480,51 @@ impl Client {
             })
             .await
             .map_err(map_change_password_err)?;
+        Ok(())
+    }
+
+    /// Begin enrolling a TOTP authenticator. Returns the new id + the base32
+    /// secret + the `otpauth://` URI (render as a QR code); the user then confirms
+    /// a code via [`confirm_totp`](Self::confirm_totp) to activate it.
+    pub async fn enroll_totp(&self) -> Result<TotpEnrollment> {
+        let mut inner = self.inner.lock().await;
+        let session = inner.session.as_mut().ok_or(ClientError::NotSignedIn)?;
+        let resp = session.enroll_totp().await.map_err(|_| ClientError::Server)?;
+        Ok(TotpEnrollment {
+            totp_id: resp.totp_id,
+            secret_base32: resp.secret_base32,
+            otpauth_uri: resp.otpauth_uri,
+        })
+    }
+
+    /// Confirm a pending TOTP enrollment with a current code. A wrong code maps to
+    /// [`ClientError::InvalidCode`]; an empty `label` defaults server-side.
+    pub async fn confirm_totp(&self, totp_id: &str, code: &str, label: &str) -> Result<()> {
+        let mut inner = self.inner.lock().await;
+        let session = inner.session.as_mut().ok_or(ClientError::NotSignedIn)?;
+        session
+            .confirm_totp(totp_id.to_string(), code.to_string(), label.to_string())
+            .await
+            .map_err(map_totp_code_err)?;
+        Ok(())
+    }
+
+    /// This account's verified TOTP authenticators (for the security screen).
+    pub async fn list_totp(&self) -> Result<Vec<TotpFactor>> {
+        let mut inner = self.inner.lock().await;
+        let session = inner.session.as_mut().ok_or(ClientError::NotSignedIn)?;
+        let factors = session.list_totp().await.map_err(|_| ClientError::Server)?;
+        Ok(factors.into_iter().map(totp_factor).collect())
+    }
+
+    /// Remove one of this account's TOTP authenticators.
+    pub async fn remove_totp(&self, totp_id: &str) -> Result<()> {
+        let mut inner = self.inner.lock().await;
+        let session = inner.session.as_mut().ok_or(ClientError::NotSignedIn)?;
+        session
+            .remove_totp(totp_id.to_string())
+            .await
+            .map_err(|_| ClientError::Server)?;
         Ok(())
     }
 
@@ -534,7 +679,29 @@ fn map_enroll_err(err: flows::EnrollError) -> ClientError {
     match err {
         flows::EnrollError::Crypto(_) => ClientError::Crypto,
         flows::EnrollError::Transport(_) | flows::EnrollError::EmptyLogin => ClientError::Server,
-        flows::EnrollError::MfaRequired => ClientError::Server, // handled as an outcome in sign_in
+    }
+}
+
+fn totp_factor(f: pb::TotpFactor) -> TotpFactor {
+    TotpFactor {
+        totp_id: f.totp_id,
+        label: f.label,
+        created_at: f.created_at,
+        last_used_at: f.last_used_at,
+    }
+}
+
+/// Map a TOTP-code RPC failure: the server rejects a wrong code with
+/// `unauthenticated` (surfaced as `InvalidCode` so the shell can prompt a retry);
+/// anything else is a coarse `Server` error.
+fn map_totp_code_err(err: crate::transport::ClientError) -> ClientError {
+    match err {
+        crate::transport::ClientError::Rpc(status)
+            if status.code() == tonic::Code::Unauthenticated =>
+        {
+            ClientError::InvalidCode
+        }
+        _ => ClientError::Server,
     }
 }
 
@@ -620,10 +787,13 @@ mod tests {
     }
 
     /// Mock Account server serving a real wrapped bundle (so unlock succeeds) +
-    /// canned devices. The avatar blob is stored so set→get round-trips.
+    /// canned devices. The avatar blob is stored so set→get round-trips. When
+    /// `require_mfa` is set, the password leg returns `MfaRequired` and
+    /// `verify_mfa` accepts the fixed code "424242".
     struct Mock {
         key_material: pb::KeyMaterial,
         avatar: std::sync::Mutex<Option<Vec<u8>>>,
+        require_mfa: bool,
     }
 
     #[tonic::async_trait]
@@ -642,12 +812,20 @@ mod tests {
             &self,
             _req: Request<pb::LoginRequest>,
         ) -> std::result::Result<Response<pb::LoginResponse>, Status> {
-            Ok(Response::new(pb::LoginResponse {
-                outcome: Some(pb::login_response::Outcome::Session(pb::Session {
+            let outcome = if self.require_mfa {
+                pb::login_response::Outcome::MfaRequired(pb::MfaRequired {
+                    mfa_challenge_token: "challenge".to_string(),
+                    methods: vec!["totp".to_string()],
+                })
+            } else {
+                pb::login_response::Outcome::Session(pb::Session {
                     token: TOKEN.to_string(),
                     user_id: "u-1".to_string(),
                     expires_at: "2030".to_string(),
-                })),
+                })
+            };
+            Ok(Response::new(pb::LoginResponse {
+                outcome: Some(outcome),
             }))
         }
         async fn get_key_material(
@@ -701,9 +879,62 @@ mod tests {
         }
         async fn verify_mfa(
             &self,
-            _req: Request<pb::VerifyMfaRequest>,
+            req: Request<pb::VerifyMfaRequest>,
         ) -> std::result::Result<Response<pb::Session>, Status> {
-            Err(Status::unimplemented("mock"))
+            let r = req.into_inner();
+            if r.mfa_challenge_token == "challenge" && r.mfa_response == b"424242" {
+                Ok(Response::new(pb::Session {
+                    token: TOKEN.to_string(),
+                    user_id: "u-1".to_string(),
+                    expires_at: "2030".to_string(),
+                }))
+            } else {
+                Err(Status::unauthenticated("incorrect code"))
+            }
+        }
+        async fn enroll_totp(
+            &self,
+            req: Request<pb::Empty>,
+        ) -> std::result::Result<Response<pb::EnrollTotpResponse>, Status> {
+            require_token(&req)?;
+            Ok(Response::new(pb::EnrollTotpResponse {
+                totp_id: "totp-1".to_string(),
+                secret_base32: "JBSWY3DPEHPK3PXP".to_string(),
+                otpauth_uri: "otpauth://totp/Sylva:o@x?secret=JBSWY3DPEHPK3PXP".to_string(),
+            }))
+        }
+        async fn confirm_totp(
+            &self,
+            req: Request<pb::ConfirmTotpRequest>,
+        ) -> std::result::Result<Response<pb::Empty>, Status> {
+            require_token(&req)?;
+            // A wrong code is rejected (drives the InvalidCode mapping).
+            if req.into_inner().code == "424242" {
+                Ok(Response::new(pb::Empty {}))
+            } else {
+                Err(Status::unauthenticated("incorrect code"))
+            }
+        }
+        async fn list_totp(
+            &self,
+            req: Request<pb::Empty>,
+        ) -> std::result::Result<Response<pb::ListTotpResponse>, Status> {
+            require_token(&req)?;
+            Ok(Response::new(pb::ListTotpResponse {
+                factors: vec![pb::TotpFactor {
+                    totp_id: "totp-1".to_string(),
+                    label: "My phone".to_string(),
+                    created_at: "2026".to_string(),
+                    last_used_at: String::new(),
+                }],
+            }))
+        }
+        async fn remove_totp(
+            &self,
+            req: Request<pb::RemoveTotpRequest>,
+        ) -> std::result::Result<Response<pb::Empty>, Status> {
+            require_token(&req)?;
+            Ok(Response::new(pb::Empty {}))
         }
         async fn get_profile(
             &self,
@@ -772,6 +1003,14 @@ mod tests {
     }
 
     async fn spawn(key_material: pb::KeyMaterial) -> (String, tokio::sync::oneshot::Sender<()>) {
+        spawn_mfa(key_material, false).await
+    }
+
+    /// As [`spawn`] but lets the test demand MFA on the password leg.
+    async fn spawn_mfa(
+        key_material: pb::KeyMaterial,
+        require_mfa: bool,
+    ) -> (String, tokio::sync::oneshot::Sender<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -780,6 +1019,7 @@ mod tests {
                 .add_service(AccountServer::new(Mock {
                     key_material,
                     avatar: std::sync::Mutex::new(None),
+                    require_mfa,
                 }))
                 .serve_with_incoming_shutdown(
                     tokio_stream::wrappers::TcpListenerStream::new(listener),
@@ -879,6 +1119,73 @@ mod tests {
         // The cached Secret Key now lets a returning sign-in omit it.
         assert!(client.vault.secret_key().unwrap().is_some());
         assert_eq!(client.vault.session_token().unwrap().as_deref(), Some(TOKEN));
+
+        let _ = shutdown.send(());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sign_in_with_mfa_then_submit_completes() {
+        // The mock demands MFA on the password leg, then accepts the fixed code
+        // "424242" and serves a real bundle so the post-MFA unlock succeeds.
+        let boot = crypto::bootstrap_identity_with_params("pw", fast()).unwrap();
+        let secret_key_str = boot.secret_key.display();
+        let (addr, shutdown) = spawn_mfa(key_material(&boot.bundle), true).await;
+        let client = Client::with_store(Box::new(MemoryStore::new()));
+        inject(&client, &addr).await;
+
+        // Password leg → MfaRequired (no session persisted yet).
+        let outcome = client
+            .sign_in("o@x", "pw", Some(&secret_key_str))
+            .await
+            .unwrap();
+        assert!(matches!(outcome, SignInOutcome::MfaRequired));
+        assert!(client.vault.session_token().unwrap().is_none());
+
+        // A wrong code → InvalidCode, and the pending state is kept for a retry.
+        let err = client.submit_mfa("000000").await.unwrap_err();
+        assert!(matches!(err, ClientError::InvalidCode));
+
+        // The right code completes sign-in and caches the session + keys.
+        let done = client.submit_mfa("424242").await.unwrap();
+        assert!(matches!(done, SignInOutcome::Success { .. }));
+        assert_eq!(client.vault.session_token().unwrap().as_deref(), Some(TOKEN));
+        assert!(client.vault.master_key().unwrap().is_some());
+
+        // submit_mfa with nothing pending → NotSignedIn.
+        let err = client.submit_mfa("424242").await.unwrap_err();
+        assert!(matches!(err, ClientError::NotSignedIn));
+
+        let _ = shutdown.send(());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn totp_management_round_trips() {
+        // Sign in (no MFA), then enroll → confirm → list → remove a TOTP factor.
+        let boot = crypto::bootstrap_identity_with_params("pw", fast()).unwrap();
+        let secret_key_str = boot.secret_key.display();
+        let (addr, shutdown) = spawn(key_material(&boot.bundle)).await;
+        let client = Client::with_store(Box::new(MemoryStore::new()));
+        inject(&client, &addr).await;
+        client.sign_in("o@x", "pw", Some(&secret_key_str)).await.unwrap();
+
+        let enrollment = client.enroll_totp().await.unwrap();
+        assert_eq!(enrollment.totp_id, "totp-1");
+        assert_eq!(enrollment.secret_base32, "JBSWY3DPEHPK3PXP");
+        assert!(enrollment.otpauth_uri.starts_with("otpauth://totp/"));
+
+        // A wrong confirm code maps to InvalidCode.
+        let err = client.confirm_totp("totp-1", "000000", "My phone").await.unwrap_err();
+        assert!(matches!(err, ClientError::InvalidCode));
+        // The right code confirms.
+        client.confirm_totp("totp-1", "424242", "My phone").await.unwrap();
+
+        let factors = client.list_totp().await.unwrap();
+        assert_eq!(factors.len(), 1);
+        assert_eq!(factors[0].totp_id, "totp-1");
+        assert_eq!(factors[0].label, "My phone");
+        assert_eq!(factors[0].last_used_at, "");
+
+        client.remove_totp("totp-1").await.unwrap();
 
         let _ = shutdown.send(());
     }

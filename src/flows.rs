@@ -20,13 +20,26 @@ pub enum EnrollError {
     Transport(#[from] ClientError),
     #[error(transparent)]
     Crypto(#[from] crypto::CryptoError),
-    #[error("multi-factor authentication is required but this client can't complete it yet")]
-    MfaRequired,
     #[error("the server's login response was empty")]
     EmptyLogin,
 }
 
 pub type Result<T> = std::result::Result<T, EnrollError>;
+
+/// The outcome of the password leg of sign-in: either fully authenticated, or
+/// the server demands a second factor (the caller then drives [`complete_mfa`]
+/// with the returned challenge token).
+// `Authenticated` (the common path) carries the unlocked identity, so it's
+// naturally the larger variant — boxing it would just add an allocation on the
+// hot path to shrink the rare `MfaRequired` case.
+#[allow(clippy::large_enum_variant)]
+pub enum LoginOutcome {
+    Authenticated(LoggedIn),
+    MfaRequired {
+        challenge_token: String,
+        methods: Vec<String>,
+    },
+}
 
 /// Identifying details for the first owner.
 pub struct NewOwner<'a> {
@@ -101,16 +114,18 @@ pub async fn enroll_new_owner_with_params(
     })
 }
 
-/// Sign in: authenticate, fetch the wrapped key material, and unlock it locally
-/// with the password + Secret Key. Returns an authed session for device ops and
-/// the unlocked identity. `MfaRequired` if the account has a second factor (not
-/// completable by this client yet); `Crypto` if the password / Secret Key is wrong.
+/// Sign in (password leg): authenticate, and on success fetch + unlock the
+/// wrapped key material locally with the password + Secret Key. Returns
+/// [`LoginOutcome::Authenticated`] when no second factor is required, or
+/// [`LoginOutcome::MfaRequired`] (with the challenge token to feed
+/// [`complete_mfa`]) when the account has one. `Crypto` if the password / Secret
+/// Key is wrong.
 pub async fn login(
     channel: Channel,
     email: &str,
     password: &str,
     secret_key: &SecretKey,
-) -> Result<LoggedIn> {
+) -> Result<LoginOutcome> {
     let response = client::login(
         channel.clone(),
         pb::LoginRequest {
@@ -122,12 +137,48 @@ pub async fn login(
     )
     .await?;
 
-    let session = match response.outcome {
-        Some(pb::login_response::Outcome::Session(session)) => session,
-        Some(pb::login_response::Outcome::MfaRequired(_)) => return Err(EnrollError::MfaRequired),
-        None => return Err(EnrollError::EmptyLogin),
-    };
+    match response.outcome {
+        Some(pb::login_response::Outcome::Session(session)) => Ok(LoginOutcome::Authenticated(
+            finish_login(channel, session, password, secret_key).await?,
+        )),
+        Some(pb::login_response::Outcome::MfaRequired(m)) => Ok(LoginOutcome::MfaRequired {
+            challenge_token: m.mfa_challenge_token,
+            methods: m.methods,
+        }),
+        None => Err(EnrollError::EmptyLogin),
+    }
+}
 
+/// Complete the second (MFA) leg of sign-in: exchange the challenge token + a
+/// TOTP code for a session, then fetch + unlock the key material exactly as the
+/// password leg would have. `Transport` (with an `unauthenticated` status) if the
+/// code is wrong or the challenge has expired.
+pub async fn complete_mfa(
+    channel: Channel,
+    challenge_token: &str,
+    code: &str,
+    password: &str,
+    secret_key: &SecretKey,
+) -> Result<LoggedIn> {
+    let session = client::verify_mfa(
+        channel.clone(),
+        pb::VerifyMfaRequest {
+            mfa_challenge_token: challenge_token.to_string(),
+            mfa_response: code.as_bytes().to_vec(),
+        },
+    )
+    .await?;
+    finish_login(channel, session, password, secret_key).await
+}
+
+/// The post-session body shared by both sign-in legs: build the authed session,
+/// fetch the wrapped key bundle, and unlock it with password + Secret Key.
+async fn finish_login(
+    channel: Channel,
+    session: pb::Session,
+    password: &str,
+    secret_key: &SecretKey,
+) -> Result<LoggedIn> {
     let mut account = AccountSession::new(channel, session.token);
     let key_material = account.key_material().await?;
     let bundle = key_material_to_bundle(key_material);
@@ -250,8 +301,43 @@ mod tests {
 
         async fn verify_mfa(
             &self,
-            _req: Request<pb::VerifyMfaRequest>,
+            req: Request<pb::VerifyMfaRequest>,
         ) -> std::result::Result<Response<pb::Session>, Status> {
+            // Accept the fixed code "424242" with the challenge the login leg
+            // issued; anything else is a wrong-code rejection.
+            let r = req.into_inner();
+            if r.mfa_challenge_token == "challenge" && r.mfa_response == b"424242" {
+                Ok(Response::new(pb::Session {
+                    token: self.token.clone(),
+                    user_id: "u-1".to_string(),
+                    expires_at: "2030-01-01T00:00:00Z".to_string(),
+                }))
+            } else {
+                Err(Status::unauthenticated("incorrect code"))
+            }
+        }
+        async fn enroll_totp(
+            &self,
+            _req: Request<pb::Empty>,
+        ) -> std::result::Result<Response<pb::EnrollTotpResponse>, Status> {
+            Err(Status::unimplemented("mock"))
+        }
+        async fn confirm_totp(
+            &self,
+            _req: Request<pb::ConfirmTotpRequest>,
+        ) -> std::result::Result<Response<pb::Empty>, Status> {
+            Err(Status::unimplemented("mock"))
+        }
+        async fn list_totp(
+            &self,
+            _req: Request<pb::Empty>,
+        ) -> std::result::Result<Response<pb::ListTotpResponse>, Status> {
+            Err(Status::unimplemented("mock"))
+        }
+        async fn remove_totp(
+            &self,
+            _req: Request<pb::RemoveTotpRequest>,
+        ) -> std::result::Result<Response<pb::Empty>, Status> {
             Err(Status::unimplemented("mock"))
         }
         async fn register_device(
@@ -387,9 +473,12 @@ mod tests {
         };
         let (channel, shutdown) = spawn(mock).await;
 
-        let logged_in = login(channel, "owner@example.com", "hunter2", &boot.secret_key)
+        let outcome = login(channel, "owner@example.com", "hunter2", &boot.secret_key)
             .await
             .unwrap();
+        let LoginOutcome::Authenticated(logged_in) = outcome else {
+            unreachable!("did not expect MFA")
+        };
         assert_eq!(logged_in.user_id, "u-1");
         assert_eq!(*logged_in.identity.master_key.as_bytes(), expected_master);
 
@@ -422,8 +511,51 @@ mod tests {
         };
         let (channel, shutdown) = spawn(mock).await;
 
-        let result = login(channel, "owner@example.com", "pw", &SecretKey::generate()).await;
-        assert!(matches!(result, Err(EnrollError::MfaRequired)));
+        let outcome = login(channel, "owner@example.com", "pw", &SecretKey::generate())
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            LoginOutcome::MfaRequired { ref methods, .. } if methods == &vec!["totp".to_string()]
+        ));
+
+        let _ = shutdown.send(());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn complete_mfa_unlocks_after_a_valid_code() {
+        // A real bundle the mock serves as this account's key material, with MFA
+        // demanded on the password leg.
+        let boot = crypto::bootstrap_identity_with_params("hunter2", fast_params()).unwrap();
+        let expected_master = *boot.identity.master_key.as_bytes();
+        let mock = FlowMock {
+            token: "tok-5".to_string(),
+            key_material: bundle_to_key_material(boot.bundle.clone()),
+            require_mfa: true,
+        };
+        let (channel, shutdown) = spawn(mock).await;
+
+        // Password leg → MfaRequired with a challenge token.
+        let outcome = login(channel.clone(), "owner@example.com", "hunter2", &boot.secret_key)
+            .await
+            .unwrap();
+        let LoginOutcome::MfaRequired { challenge_token, .. } = outcome else {
+            unreachable!("expected MFA")
+        };
+
+        // A wrong code is rejected by the server (unauthenticated → Transport).
+        let wrong =
+            complete_mfa(channel.clone(), &challenge_token, "000000", "hunter2", &boot.secret_key)
+                .await;
+        assert!(matches!(wrong, Err(EnrollError::Transport(_))));
+
+        // The correct code completes MFA and unlocks the same master key.
+        let logged_in =
+            complete_mfa(channel, &challenge_token, "424242", "hunter2", &boot.secret_key)
+                .await
+                .unwrap();
+        assert_eq!(logged_in.user_id, "u-1");
+        assert_eq!(*logged_in.identity.master_key.as_bytes(), expected_master);
 
         let _ = shutdown.send(());
     }

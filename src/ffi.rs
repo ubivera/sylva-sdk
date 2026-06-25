@@ -16,6 +16,7 @@ use tokio::runtime::Runtime;
 
 use crate::client::{
     Client, ClientError, ConnectInfo, DeviceInfo, Enrollment, Profile, SignInOutcome,
+    TotpEnrollment, TotpFactor,
 };
 
 /// The shell-facing handle: a blocking wrapper over the async [`Client`] facade
@@ -76,6 +77,13 @@ impl SylvaClient {
             .block_on(self.client.sign_in(&email, &password, secret_key.as_deref()))
     }
 
+    /// Complete a sign-in that returned `MfaRequired` by submitting the user's
+    /// TOTP `code`. A wrong code returns `InvalidCode` and the pending sign-in is
+    /// kept so the user can retry.
+    pub fn submit_mfa(&self, code: String) -> Result<SignInOutcome, ClientError> {
+        self.runtime.block_on(self.client.submit_mfa(&code))
+    }
+
     /// Enroll this device into the signed-in account.
     pub fn enroll_this_device(&self, label: String) -> Result<DeviceInfo, ClientError> {
         self.runtime
@@ -123,6 +131,34 @@ impl SylvaClient {
     ) -> Result<(), ClientError> {
         self.runtime
             .block_on(self.client.change_password(&current_password, &new_password))
+    }
+
+    /// Begin enrolling a TOTP authenticator. Returns the id + base32 secret +
+    /// `otpauth://` URI (render as a QR code); confirm a code to activate it.
+    pub fn enroll_totp(&self) -> Result<TotpEnrollment, ClientError> {
+        self.runtime.block_on(self.client.enroll_totp())
+    }
+
+    /// Confirm a pending TOTP enrollment with a current code. A wrong code maps
+    /// to `InvalidCode`; an empty `label` defaults server-side.
+    pub fn confirm_totp(
+        &self,
+        totp_id: String,
+        code: String,
+        label: String,
+    ) -> Result<(), ClientError> {
+        self.runtime
+            .block_on(self.client.confirm_totp(&totp_id, &code, &label))
+    }
+
+    /// This account's verified TOTP authenticators (for the security screen).
+    pub fn list_totp(&self) -> Result<Vec<TotpFactor>, ClientError> {
+        self.runtime.block_on(self.client.list_totp())
+    }
+
+    /// Remove one of this account's TOTP authenticators.
+    pub fn remove_totp(&self, totp_id: String) -> Result<(), ClientError> {
+        self.runtime.block_on(self.client.remove_totp(&totp_id))
     }
 
     /// This account's avatar (decrypted), or `None` if unset. Needs the cached
